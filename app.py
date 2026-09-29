@@ -4,7 +4,6 @@ import time
 import numpy as np
 import geopandas as gpd
 import rasterio
-from rasterio.mask import mask
 from rasterio.enums import Resampling
 from rasterio.transform import from_bounds
 import tempfile
@@ -12,6 +11,7 @@ import zipfile
 import shapely.geometry
 import pystac_client
 import planetary_computer
+from osgeo import gdal
 
 st.set_page_config(page_title="Syntro Academy - Descargador DEM 2.5m", page_icon="🛰️", layout="centered")
 
@@ -33,9 +33,9 @@ with col_logo:
         st.write("🛰️")
 with col_title:
     st.title("SYNTRO - DESCARGADOR DEM 2.5M")
-    st.markdown("### Extracción Automática por Archivo Perimetral")
+    st.markdown("### Extracción Automática por Archivo Perimetral (Motor GDAL)")
 
-st.info("Sube el perímetro de tu área de estudio (GeoJSON, KML, KMZ o Shapefile en .zip) para procesar de forma segura y descargar el DEM en formato .tif.")
+st.info("Sube el perímetro de tu área de estudio (GeoJSON, KML, KMZ o Shapefile en .zip) para procesar con GDAL Warp y descargar el DEM a 2.5m en formato .tif.")
 
 # Archivo Geográfico (Entrada principal)
 uploaded_vector = st.file_uploader(
@@ -61,7 +61,7 @@ if st.button("🚀 PROCESAR Y DESCARGAR DEM 2.5M (.tif)", type="primary"):
         logs_history.clear()
         start_time = time.time()
         
-        progress_bar.progress(10)
+        progress_bar.progress(15)
         status_label.text("⏱️ Leyendo límites del área de estudio...")
         registrar_log("Cargando archivo vectorial subido por el usuario...")
         
@@ -90,9 +90,9 @@ if st.button("🚀 PROCESAR Y DESCARGAR DEM 2.5M (.tif)", type="primary"):
                     vector_gdf = gpd.read_file(shp_files[0])
             
             if vector_gdf is not None and not vector_gdf.empty:
-                progress_bar.progress(30)
+                progress_bar.progress(35)
                 
-                # Garantizar CRS de origen y transformar a WGS84
+                # Garantizar CRS de origen y transformar a WGS84 para búsqueda STAC
                 if vector_gdf.crs is None:
                     vector_gdf.set_crs("EPSG:4326", inplace=True)
                 
@@ -126,95 +126,48 @@ if st.button("🚀 PROCESAR Y DESCARGAR DEM 2.5M (.tif)", type="primary"):
                 if not items:
                     raise Exception("No se encontraron teselas DEM para la extensión geográfica especificada.")
                 
-                registrar_log("Tesela encontrada. Extrayendo y transformando directamente a malla UTM de 2.5m...")
+                registrar_log(f"Se encontraron {len(items)} teselas. Preparando motor GDAL Warp...")
                 progress_bar.progress(70)
                 
-                dem_url = items[0].assets["data"].href
+                input_urls = [item.assets["data"].href for item in items]
                 output_file = os.path.join(temp_dir, "DEM_Real_2.5m_Syntro.tif")
                 
-                # Proyectar el perimetral a UTM para definir la malla exacta de salida
+                # Transformar perimetral a UTM para calcular límites con un pequeño búfer
                 vector_utm = vector_gdf.to_crs(f"EPSG:{epsg_utm}")
-                minx, miny, maxx, maxy = vector_utm.total_bounds
+                extent_utm = vector_utm.total_bounds  # minx, miny, maxx, maxy
                 
-                res = 2.5
-                width = int(round((maxx - minx) / res))
-                height = int(round((maxy - miny) / res))
-                transform_25m = from_bounds(minx, miny, maxx, maxy, width, height)
+                x_buf = (extent_utm[2] - extent_utm[0]) * 0.02
+                y_buf = (extent_utm[3] - extent_utm[1]) * 0.02
                 
-                reprojected_data = np.zeros((1, height, width), dtype=np.float32)
+                xmin = extent_utm[0] - x_buf
+                xmax = extent_utm[2] + x_buf
+                ymin = extent_utm[1] - y_buf
+                ymax = extent_utm[3] + y_buf
                 
-                with rasterio.open(dem_url) as src:
-                    rasterio.warp.reproject(
-                        source=rasterio.band(src, 1),
-                        destination=reprojected_data[0],
-                        src_transform=src.transform,
-                        src_crs=src.crs,
-                        dst_transform=transform_25m,
-                        dst_crs=f"EPSG:{epsg_utm}",
-                        resampling=Resampling.bilinear,
-                        src_nodata=src.nodata if src.nodata is not None else -9999.0,
-                        dst_nodata=0.0
-                    )
+                registrar_log("Ejecutando motor GDAL Warp (remuestreo bilinear a píxel de 2.5m)...")
                 
-                # Aplicar máscara vectorial geométrica directa sobre la matriz UTM proyectada
-                geom_utm = [shapely.geometry.mapping(g) for g in vector_utm.geometry]
+                # Opciones idénticas al script de QGIS que me pasaste
+                warp_options = gdal.WarpOptions(
+                    format='GTiff',
+                    dstSRS=f"EPSG:{epsg_utm}",
+                    xRes=2.5,
+                    yRes=2.5,
+                    resampleAlg=gdal.GRA_Bilinear,
+                    outputBounds=[xmin, ymin, xmax, ymax],
+                    warpMemoryLimit=512 * 1024 * 1024,
+                    multithread=True,
+                    creationOptions=["COMPRESS=DEFLATE", "TILED=YES"]
+                )
                 
-                # Guardar un archivo UTM temporal para aplicar el mask limpio
-                temp_utm_path = os.path.join(temp_dir, "temp_utm.tif")
-                with rasterio.open(
-                    temp_utm_path, "w",
-                    driver="GTiff",
-                    height=height,
-                    width=width,
-                    count=1,
-                    dtype="float32",
-                    crs=f"EPSG:{epsg_utm}",
-                    transform=transform_25m,
-                    nodata=0.0
-                ) as tmp_dst:
-                    tmp_dst.write(reprojected_data)
+                result_ds = gdal.Warp(output_file, input_urls, options=warp_options)
+                if result_ds is None:
+                    raise Exception("Falló la ejecución de gdal.Warp para generar el DEM.")
+                result_ds = None  # Cierra y guarda el archivo en disco
                 
-                with rasterio.open(temp_utm_path) as src_utm:
-                    out_image, out_transform = mask(
-                        src_utm,
-                        geom_utm,
-                        crop=True,
-                        all_touched=True,
-                        filled=True,
-                        nodata=0.0
-                    )
-                
-                # Reemplazar ceros de fondo por el valor mínimo real del terreno para que GeoLibre no pinte negro
-                valid_pixels = out_image[out_image > 0.0]
-                if valid_pixels.size > 0:
-                    real_min = float(np.min(valid_pixels))
-                    real_max = float(np.max(valid_pixels))
-                    out_image[out_image <= 0.0] = real_min
-                    registrar_log(f"Alturas optimizadas para GeoLibre -> Mín: {real_min:.2f}m | Máx: {real_max:.2f}m")
-                else:
-                    real_min, real_max = 1.0, 100.0
-
-                # Escritura final del GeoTIFF recortado sin marco negro
-                with rasterio.open(
-                    output_file, 
-                    "w", 
-                    driver="GTiff",
-                    height=out_image.shape[1],
-                    width=out_image.shape[2],
-                    count=1,
-                    dtype="float32",
-                    crs=f"EPSG:{epsg_utm}",
-                    transform=out_transform,
-                    nodata=None,
-                    compress="lzw"
-                ) as dst_out:
-                    dst_out.write(out_image)
-                    dst_out.update_tags(1, STATISTICS_MINIMUM=str(real_min), STATISTICS_MAXIMUM=str(real_max))
-
                 elapsed_time = round(time.time() - start_time, 2)
                 progress_bar.progress(100)
                 status_label.text(f"⏱ ¡Proceso completado en {elapsed_time} segundos!")
-                registrar_log(f"DEM perimetral limpio generado con éxito (EPSG:{epsg_utm}).")
+                registrar_log(f"DEM generado exitosamente mediante GDAL Warp (EPSG:{epsg_utm}).")
                 
                 st.success("¡El DEM de elevación real a 2.5m está listo para descargar!")
                 
@@ -226,7 +179,7 @@ if st.button("🚀 PROCESAR Y DESCARGAR DEM 2.5M (.tif)", type="primary"):
                         mime="image/tiff"
                     )
             else:
-                st.error("No se pudo interpretar el archivo vectorial del área de estudio.")
+                st.error("El archivo vectorial subido está vacío o no se pudo interpretar correctamente.")
         except Exception as e:
             registrar_log(f"Error crítico: {str(e)}")
             st.error(f"Ocurrió un error en el proceso: {str(e)}")
