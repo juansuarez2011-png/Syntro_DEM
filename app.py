@@ -445,7 +445,7 @@ if st.button("🚀 PROCESAR Y DESCARGAR DEM 2.5M (.tif)", type="primary"):
                     )
 
             # ============================================================
-            # ESTADÍSTICAS REALES + POST-PROCESO
+            # ESTADÍSTICAS REALES + COLORINTERP
             # ============================================================
             with rasterio.open(output_file, "r+") as dst:
                 data_final = dst.read(1)
@@ -483,7 +483,7 @@ if st.button("🚀 PROCESAR Y DESCARGAR DEM 2.5M (.tif)", type="primary"):
                         f"min={stats_min:.2f} m | max={stats_max:.2f} m"
                     )
 
-            # --- Post-proceso con GDAL: nodata + colorinterp + .aux.xml ---
+            # --- Post-proceso con GDAL: nodata + .aux.xml ---
             try:
                 from osgeo import gdal
                 gdal.UseExceptions()
@@ -498,19 +498,53 @@ if st.button("🚀 PROCESAR Y DESCARGAR DEM 2.5M (.tif)", type="primary"):
                     ds.FlushCache()
                     ds = None
 
-                with rasterio.open(output_file, "r+") as dst:
-                    dst.colorinterp = [ColorInterp.gray]
-
-                registrar_log("✅ Nodata, estadísticas y colorinterp grabados en el GeoTIFF.")
+                registrar_log("✅ Nodata y estadísticas grabados con GDAL.")
 
             except Exception as e_post:
-                registrar_log(f"⚠️ Post-proceso opcional falló (no crítico): {e_post}")
+                registrar_log(f"⚠️ Post-proceso GDAL falló (no crítico): {e_post}")
 
             # ============================================================
-            # GENERAR ARCHIVO .QML (ESTILO QGIS/GEOGLIBRE)
+            # AÑADIR COLORMAP HIPSOMÉTRICO EMBEBIDO AL .TIF
+            # ============================================================
+            try:
+                import matplotlib.cm as cm
+                from matplotlib.colors import Normalize
+
+                # Paleta hipsométrica: azul→verde→amarillo→marrón→blanco
+                cmap = cm.get_cmap("terrain")
+
+                colormap_entries = {}
+                for i in range(256):
+                    rgba = cmap(i / 255.0)
+                    r = int(rgba[0] * 255)
+                    g = int(rgba[1] * 255)
+                    b = int(rgba[2] * 255)
+                    a = int(rgba[3] * 255)
+                    colormap_entries[i] = (r, g, b, a)
+
+                with rasterio.open(output_file, "r+") as dst:
+                    dst.write_colormap(1, colormap_entries)
+                    dst.colorinterp = [ColorInterp.palette]
+
+                registrar_log("🎨 Colormap hipsométrico embebido en el GeoTIFF.")
+
+            except Exception as e_cm:
+                registrar_log(f"⚠️ No se pudo añadir colormap embebido: {e_cm}")
+                # Fallback: al menos marcar como gray
+                try:
+                    with rasterio.open(output_file, "r+") as dst:
+                        dst.colorinterp = [ColorInterp.gray]
+                except Exception:
+                    pass
+
+            # ============================================================
+            # GENERAR ARCHIVO .QML CORREGIDO (para QGIS/GeoLibre)
             # ============================================================
             qml_path = output_file.replace(".tif", ".qml")
             try:
+                qml_min = min_out if min_out != max_out else (min_out - 1.0)
+                qml_max = max_out if min_out != max_out else (max_out + 1.0)
+
                 qml_content = f"""<!DOCTYPE qgis PUBLIC 'http://mrcc.com/qgis.dtd' 'SYSTEM'>
 <qgis version="3.34.0-Prizren" styleCategories="AllStyleCategories">
   <pipe>
@@ -532,24 +566,20 @@ if st.button("🚀 PROCESAR Y DESCARGAR DEM 2.5M (.tif)", type="primary"):
         <cumulativeCutUpper>0.98</cumulativeCutUpper>
       </minMaxOrigin>
       <contrastEnhancement>
-        <minValue>{min_out}</minValue>
-        <maxValue>{max_out}</maxValue>
+        <minValue>{qml_min}</minValue>
+        <maxValue>{qml_max}</maxValue>
         <algorithm>StretchToMinimumMaximum</algorithm>
       </contrastEnhancement>
-      <colorPalette>
-        <paletteEntry value="0" color="#000000" label="0"/>
-        <paletteEntry value="255" color="#ffffff" label="255"/>
-      </colorPalette>
     </rasterrenderer>
-    <brightnesscontrast gamma="1" brightness="0" contrast="0" />
-    <huesaturation grayscaleMode="0" />
+    <brightnesscontrast gamma="1" brightness="0" contrast="0"/>
+    <huesaturation grayscaleMode="0"/>
     <rasterresampler maxOversampling="2"/>
   </pipe>
 </qgis>
 """
                 with open(qml_path, "w", encoding="utf-8") as f_qml:
                     f_qml.write(qml_content)
-                registrar_log("🎨 Estilo .qml generado (transparencia -9999 + rango real).")
+                registrar_log(f"🎨 Estilo .qml generado (rango {qml_min:.2f} a {qml_max:.2f}, nodata -9999 transparente).")
 
             except Exception as e_qml:
                 registrar_log(f"⚠️ No se pudo generar el .qml: {e_qml}")
