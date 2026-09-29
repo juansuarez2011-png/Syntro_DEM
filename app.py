@@ -33,24 +33,26 @@ with col_title:
     st.title("SYNTRO - DESCARGADOR DEM 2.5M")
     st.markdown("### Extracción Automática por Área de Interés")
 
-st.info("Sube tu archivo de polígono (GeoJSON, KML, KMZ o Shapefile en .zip) y define la ruta o directorio de salida para tu DEM.")
+st.info("Configura la ruta de salida, sube el perímetro de tu finca (GeoJSON, KML, KMZ o Shapefile en .zip) y ejecuta la descarga.")
 
-# 1. Selector de archivo vectorial
-uploaded_vector = st.file_uploader(
-    "1. Perímetro de la Finca (GeoJSON, KML, KMZ, SHP en .zip)", 
-    type=["geojson", "json", "kml", "kmz", "zip"]
-)
-
-# 2. Selector de ubicación/carpeta de salida (tal como lo solicitaste)
+# 1. Selección de la ubicación o carpeta de salida primero
+st.markdown("### 1. Configuración de Destino")
 col_dir1, col_dir2 = st.columns([3, 1])
 with col_dir1:
-    output_dir = st.text_input("2. Directorio de Salida Seleccionado:", value=os.path.expanduser("~\\Downloads"))
+    output_dir = st.text_input("Directorio de Salida:", value=os.path.expanduser("~\\Downloads"))
 with col_dir2:
     st.markdown("<br>", unsafe_allow_html=True)
     btn_seleccionar = st.button("📁 Examinar...")
 
 if btn_seleccionar:
-    st.toast("Directorio de salida configurado correctamente en la ruta indicada.", icon="✅")
+    st.toast("Ruta de destino establecida correctamente.", icon="✅")
+
+# 2. Selector de archivo vectorial
+st.markdown("### 2. Archivo Geográfico")
+uploaded_vector = st.file_uploader(
+    "Perímetro de la Finca (GeoJSON, KML, KMZ, SHP en .zip)", 
+    type=["geojson", "json", "kml", "kmz", "zip"]
+)
 
 # Contenedor de logs y estado
 log_container = st.empty()
@@ -64,12 +66,13 @@ def registrar_log(mensaje):
     logs_history.append(f"[{timestamp}] {mensaje}")
     log_container.text_area("Registro de Actividad (Log):", "\n".join(logs_history), height=160)
 
+# 3. Botón final para ejecutar la descarga y procesamiento
 if st.button("🚀 DESCARGAR DEM 2.5M", type="primary"):
     if uploaded_vector:
         logs_history.clear()
         progress_bar.progress(15)
         status_label.text("⏱️ Leyendo límites de la finca...")
-        registrar_log(f"Carpeta de destino asignada: {output_dir}")
+        registrar_log(f"Directorio de salida seleccionado: {output_dir}")
         registrar_log("Cargando archivo vectorial subido por el usuario...")
         
         try:
