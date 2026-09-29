@@ -273,7 +273,7 @@ if st.button("🚀 PROCESAR Y DESCARGAR DEM 2.5M (.tif)", type="primary"):
 
                 min_out, max_out = min_elev, max_elev
 
-                # ============ GUARDADO "PELADO" (sin tags raros) ============
+                # ============ GUARDADO FINAL ============
                 with rasterio.open(
                     output_file, "w", driver="GTiff",
                     height=out_image.shape[1],
@@ -290,7 +290,7 @@ if st.button("🚀 PROCESAR Y DESCARGAR DEM 2.5M (.tif)", type="primary"):
                     dst_out.write(out_image)
                     dst_out.set_band_description(1, "Elevacion_m")
 
-            # ============ POST-PROCESO GDAL: SOLO NODATA + ESTADÍSTICAS ============
+            # ============ POST-PROCESO GDAL ============
             try:
                 from osgeo import gdal
                 gdal.UseExceptions()
@@ -307,7 +307,7 @@ if st.button("🚀 PROCESAR Y DESCARGAR DEM 2.5M (.tif)", type="primary"):
             except Exception as e_post:
                 registrar_log(f"⚠️ Post-proceso GDAL: {e_post}")
 
-            # ============ .QML PARA VISUALIZACIÓN DIRECTA ============
+            # ============ GENERAR .QML ============
             qml_path = output_file.replace(".tif", ".qml")
             try:
                 qml_min = min_out if min_out != max_out else (min_out - 1.0)
@@ -348,6 +348,13 @@ if st.button("🚀 PROCESAR Y DESCARGAR DEM 2.5M (.tif)", type="primary"):
             except Exception as e_qml:
                 registrar_log(f"⚠️ .qml: {e_qml}")
 
+            # ============ DESCARGA ÚNICA EN ZIP ============
+            zip_output = os.path.join(temp_dir, "DEM_Real_2.5m_Syntro.zip")
+            with zipfile.ZipFile(zip_output, "w", zipfile.ZIP_DEFLATED) as zf:
+                zf.write(output_file, arcname="DEM_Real_2.5m_Syntro.tif")
+                if os.path.exists(qml_path):
+                    zf.write(qml_path, arcname="DEM_Real_2.5m_Syntro.qml")
+
             # ============ FIN ============
             elapsed_time = round(time.time() - start_time, 2)
             progress_bar.progress(100)
@@ -362,33 +369,20 @@ if st.button("🚀 PROCESAR Y DESCARGAR DEM 2.5M (.tif)", type="primary"):
             col2.metric("Elev. máxima", f"{max_elev:.2f} m")
             col3.metric("Rango", f"{max_elev - min_elev:.2f} m")
 
-            col_dl1, col_dl2 = st.columns(2)
-            with col_dl1:
-                with open(output_file, "rb") as f:
-                    st.download_button(
-                        "📥 Descargar DEM (.tif)",
-                        f,
-                        file_name="DEM_Real_2.5m_Syntro.tif",
-                        mime="image/tiff",
-                        use_container_width=True
-                    )
-            with col_dl2:
-                if os.path.exists(qml_path):
-                    with open(qml_path, "rb") as f_qml:
-                        st.download_button(
-                            "🎨 Descargar estilo (.qml)",
-                            f_qml,
-                            file_name="DEM_Real_2.5m_Syntro.qml",
-                            mime="application/octet-stream",
-                            use_container_width=True
-                        )
+            with open(zip_output, "rb") as f_zip:
+                st.download_button(
+                    "📦 Descargar DEM + Estilo (.zip)",
+                    f_zip,
+                    file_name="DEM_Real_2.5m_Syntro.zip",
+                    mime="application/zip",
+                    use_container_width=True
+                )
 
             st.warning(
-                "⚠️ **IMPORTANTE para GeoLibre:** Descarga **AMBOS** archivos (`.tif` + `.qml`) "
-                "y guárdalos **en la misma carpeta** con el mismo nombre base. "
-                "Luego en GeoLibre: clic derecho en la capa → **Propiedades** → "
-                "**Cargar estilo → Desde archivo** → selecciona el `.qml`. "
-                "Con eso verás el DEM **igual que en QGIS**."
+                "⚠️ **IMPORTANTE para GeoLibre:** El ZIP contiene el `.tif` y el `.qml`. "
+                "**Descomprime el ZIP en una carpeta** y luego en GeoLibre: "
+                "clic derecho en la capa → **Propiedades** → **Cargar estilo → Desde archivo** → "
+                "selecciona el `.qml`. Con eso verás el DEM **igual que en QGIS**."
             )
 
         except Exception as e:
