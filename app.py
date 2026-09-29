@@ -31,14 +31,20 @@ with col_logo:
         st.write("🛰️")
 with col_title:
     st.title("SYNTRO - DESCARGADOR DEM 2.5M")
-    st.markdown("### Extracción Automática por Área de Interés (GeoJSON / Shapefile)")
+    st.markdown("### Extracción Automática por Área de Interés")
 
-st.info("Sube únicamente el perímetro de tu finca (GeoJSON, KML, KMZ o Shapefile comprimido en .zip). El sistema descargará y procesará el DEM a 2.5m listo para GEOLIBRE.")
+st.info("Sube el perímetro de tu finca (GeoJSON, KML, KMZ o Shapefile en .zip) y define la carpeta de salida para guardar tu DEM a 2.5m.")
 
-# Único campo de entrada: Perímetro de la Finca
+# 1. Selector de archivo vectorial
 uploaded_vector = st.file_uploader(
-    "Perímetro de la Finca (GeoJSON, KML, KMZ, SHP en .zip)", 
+    "1. Perímetro de la Finca (GeoJSON, KML, KMZ, SHP en .zip)", 
     type=["geojson", "json", "kml", "kmz", "zip"]
+)
+
+# 2. Campo para definir la carpeta de salida
+output_folder = st.text_input(
+    "2. Ruta de la Carpeta de Salida (ej. C:/Users/Usuario/Descargas o ruta local)", 
+    value=""
 )
 
 # Contenedor de logs y estado
@@ -70,7 +76,6 @@ if st.button("🚀 DESCARGAR DEM 2.5M", type="primary"):
             vector_gdf = None
             ext = uploaded_vector.name.split('.')[-1].lower()
             if ext in ["geojson", "json", "kml", "kmz"]:
-                # Manejo de KML con fiona/geopandas si es necesario
                 if ext == "kml":
                     gpd.io.file.fiona.drvsupport.supported_drivers['KML'] = 'rw'
                 vector_gdf = gpd.read_file(vector_path)
@@ -122,7 +127,6 @@ if st.button("🚀 DESCARGAR DEM 2.5M", type="primary"):
                 vector_utm = vector_gdf.to_crs(f"EPSG:{epsg_utm}")
                 geom = [shapely.geometry.mapping(g) for g in vector_utm.geometry]
                 
-                # Recorte y rasterización del DEM original adaptado al área
                 with rasterio.open(dem_url) as src:
                     out_image, out_transform = mask(src, geom, crop=True)
                     out_meta = src.meta.copy()
@@ -140,11 +144,21 @@ if st.button("🚀 DESCARGAR DEM 2.5M", type="primary"):
                 with rasterio.open(output_file, "w", **out_meta) as dst:
                     dst.write(dem_data, 1)
                 
+                # Si el usuario especificó una carpeta local válida en su equipo, intentamos guardarlo allí también
+                if output_folder and os.path.exists(output_folder):
+                    try:
+                        destino_final = os.path.join(output_folder, "DEM_Real_2.5m_Syntro.tif")
+                        import shutil
+                        shutil.copyfile(output_file, destino_final)
+                        registrar_log(f"Archivo copiado exitosamente en la carpeta local: {destino_final}")
+                    except Exception as ex:
+                        registrar_log(f"No se pudo escribir en la carpeta local indicada: {str(ex)}")
+
                 progress_bar.progress(100)
                 status_label.text("⏱️ ¡Proceso finalizado con éxito!")
                 registrar_log("DEM de 2.5m generado exitosamente.")
                 
-                st.success("¡El DEM de alta resolución (2.5m) está listo para descargar!")
+                st.success("¡El DEM de alta resolución (2.5m) está listo!")
                 
                 with open(output_file, "rb") as f:
                     st.download_button(
@@ -154,7 +168,7 @@ if st.button("🚀 DESCARGAR DEM 2.5M", type="primary"):
                         mime="image/tiff"
                     )
             else:
-                st.error("No se pudo interpretar el archivo vectorial. Asegúrate de que sea un GeoJSON, KML o ZIP válido.")
+                st.error("No se pudo interpretar el archivo vectorial.")
         except Exception as e:
             registrar_log(f"Error: {str(e)}")
             st.error(f"Ocurrió un error en el proceso: {str(e)}")
