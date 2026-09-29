@@ -7,4 +7,3 @@ pillow
 shapely
 pystac-client
 planetary-computer
-GDAL
