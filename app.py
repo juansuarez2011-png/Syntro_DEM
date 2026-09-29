@@ -33,26 +33,13 @@ with col_logo:
         st.write("🛰️")
 with col_title:
     st.title("SYNTRO - DESCARGADOR DEM 2.5M")
-    st.markdown("### Extracción Automática por Área de Interés")
+    st.markdown("### Extracción Automática por Área de Estudio")
 
-st.info("Configura la ruta de salida, sube el perímetro de tu finca (GeoJSON, KML, KMZ o Shapefile en .zip) y ejecuta la descarga.")
+st.info("Sube el perímetro de tu área de estudio (GeoJSON, KML, KMZ o Shapefile en .zip) para descargar el DEM de elevación en formato .tif.")
 
-# 1. Configuración de Destino
-st.markdown("### 1. Configuración de Destino")
-col_dir1, col_dir2 = st.columns([3, 1])
-with col_dir1:
-    output_dir = st.text_input("Directorio de Salida:", value=os.path.expanduser("~\\Downloads"))
-with col_dir2:
-    st.markdown("<br>", unsafe_allow_html=True)
-    btn_seleccionar = st.button("📁 Examinar...")
-
-if btn_seleccionar:
-    st.toast("Ruta de destino establecida correctamente.", icon="✅")
-
-# 2. Archivo Geográfico
-st.markdown("### 2. Archivo Geográfico")
+# Archivo Geográfico (Único campo de entrada)
 uploaded_vector = st.file_uploader(
-    "Perímetro de la Finca (GeoJSON, KML, KMZ, SHP en .zip)", 
+    "Perímetro del Área de Estudio (GeoJSON, KML, KMZ, SHP en .zip)", 
     type=["geojson", "json", "kml", "kmz", "zip"]
 )
 
@@ -68,13 +55,12 @@ def registrar_log(mensaje):
     logs_history.append(f"[{timestamp}] {mensaje}")
     log_container.text_area("Registro de Actividad (Log):", "\n".join(logs_history), height=160)
 
-# 3. Botón final para ejecutar la descarga y procesamiento
-if st.button("🚀 DESCARGAR DEM 2.5M", type="primary"):
+# Botón para ejecutar la descarga y procesamiento del DEM
+if st.button("🚀 DESCARGAR DEM 2.5M (.tif)", type="primary"):
     if uploaded_vector:
         logs_history.clear()
         progress_bar.progress(15)
-        status_label.text("⏱️ Leyendo límites de la finca...")
-        registrar_log(f"Directorio de salida seleccionado: {output_dir}")
+        status_label.text("⏱️ Leyendo límites del área de estudio...")
         registrar_log("Cargando archivo vectorial subido por el usuario...")
         
         try:
@@ -129,7 +115,7 @@ if st.button("🚀 DESCARGAR DEM 2.5M", type="primary"):
                 if not items:
                     raise Exception("No se encontraron teselas DEM para la extensión geográfica especificada.")
                 
-                registrar_log("Tesela encontrada. Procesando recorte y reescalado a resolución de 2.5 metros (.tif)...")
+                registrar_log("Tesela encontrada. Procesando recorte y reescalado a 2.5 metros (.tif)...")
                 progress_bar.progress(80)
                 
                 dem_url = items[0].assets["data"].href
@@ -149,8 +135,6 @@ if st.button("🚀 DESCARGAR DEM 2.5M", type="primary"):
                         nodata=-9999.0
                     )
                     
-                    # Remuestreo de la celda a 2.5m si la resolución original es mayor
-                    # Calculamos las nuevas dimensiones basadas en una resolución de salida de 2.5 metros
                     minx, miny, maxx, maxy = vector_utm.total_bounds
                     res = 2.5
                     width = int(round((maxx - minx) / res))
@@ -193,22 +177,12 @@ if st.button("🚀 DESCARGAR DEM 2.5M", type="primary"):
                 
                 with rasterio.open(output_file, "w", **out_meta) as dst:
                     dst.write(dem_data, 1)
-                
-                # Guardar automáticamente en la ruta especificada si existe
-                if output_dir and os.path.exists(output_dir):
-                    try:
-                        destino_final = os.path.join(output_dir, "DEM_Real_2.5m_Syntro.tif")
-                        import shutil
-                        shutil.copyfile(output_file, destino_final)
-                        registrar_log(f"Archivo guardado exitosamente en: {destino_final}")
-                    except Exception as ex:
-                        registrar_log(f"Aviso al guardar localmente: {str(ex)}")
 
                 progress_bar.progress(100)
                 status_label.text("⏱️ ¡Proceso finalizado con éxito!")
-                registrar_log("DEM de 2.5m exportado en formato TIF correctamente.")
+                registrar_log("DEM de elevación exportado en formato .tif correctamente a partir del área de estudio.")
                 
-                st.success("¡El DEM en formato TIF (.tif) a 2.5m está listo para GEOLIBRE!")
+                st.success("¡El DEM de elevación en formato TIF (.tif) a 2.5m está listo para descargar!")
                 
                 with open(output_file, "rb") as f:
                     st.download_button(
@@ -218,9 +192,9 @@ if st.button("🚀 DESCARGAR DEM 2.5M", type="primary"):
                         mime="image/tiff"
                     )
             else:
-                st.error("No se pudo interpretar el archivo vectorial.")
+                st.error("No se pudo interpretar el archivo vectorial del área de estudio.")
         except Exception as e:
             registrar_log(f"Error: {str(e)}")
             st.error(f"Ocurrió un error en el proceso: {str(e)}")
     else:
-        st.warning("Por favor, sube el archivo con el perímetro de tu finca.")
+        st.warning("Por favor, sube el archivo con el perímetro de tu área de estudio.")
