@@ -1,0 +1,10 @@
+streamlit
+numpy
+rasterio
+geopandas
+scipy
+pillow
+shapely
+pystac-client
+planetary-computer
+GDAL
