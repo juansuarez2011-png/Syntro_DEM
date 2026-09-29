@@ -35,7 +35,7 @@ with col_title:
     st.title("SYNTRO - DESCARGADOR DEM 2.5M")
     st.markdown("### Extracción Automática por Área de Estudio")
 
-st.info("Sube el perímetro de tu área de estudio (GeoJSON, KML, KMZ o Shapefile en .zip) para descargar el DEM de elevación en formato .tif.")
+st.info("Sube el perímetro de tu área de estudio (GeoJSON, KML, KMZ o Shapefile en .zip) para procesar y descargar el DEM en formato .tif.")
 
 # Archivo Geográfico (Único campo de entrada)
 uploaded_vector = st.file_uploader(
