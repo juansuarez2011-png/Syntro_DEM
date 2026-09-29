@@ -33,7 +33,7 @@ with col_title:
     st.title("SYNTRO - DESCARGADOR DEM 2.5M")
     st.markdown("### Extracción Automática por Área de Interés")
 
-st.info("Sube el perímetro de tu finca (GeoJSON, KML, KMZ o Shapefile en .zip) y define la carpeta de salida para guardar tu DEM a 2.5m.")
+st.info("Sube el perímetro de tu finca (GeoJSON, KML, KMZ o Shapefile en .zip) y selecciona la ubicación de salida para tu DEM.")
 
 # 1. Selector de archivo vectorial
 uploaded_vector = st.file_uploader(
@@ -41,10 +41,10 @@ uploaded_vector = st.file_uploader(
     type=["geojson", "json", "kml", "kmz", "zip"]
 )
 
-# 2. Campo para definir la carpeta de salida
-output_folder = st.text_input(
-    "2. Ruta de la Carpeta de Salida (ej. C:/Users/Usuario/Descargas o ruta local)", 
-    value=""
+# 2. Selector visual de ubicación de salida
+opcion_destino = st.selectbox(
+    "2. Seleccionar ubicación de salida:",
+    ["Carpeta de Descargas del Navegador", "Directorio Temporal del Proyecto", "Carpeta Personalizada Cloud"]
 )
 
 # Contenedor de logs y estado
@@ -63,7 +63,8 @@ if st.button("🚀 DESCARGAR DEM 2.5M", type="primary"):
     if uploaded_vector:
         logs_history.clear()
         progress_bar.progress(15)
-        status_label.text("⏱️ Leyendo límites de la finca...")
+        status_label.text("⏱️️ Leyendo límites de la finca...")
+        registrar_log(f"Destino seleccionado: {opcion_destino}")
         registrar_log("Cargando archivo vectorial subido por el usuario...")
         
         try:
@@ -72,7 +73,7 @@ if st.button("🚀 DESCARGAR DEM 2.5M", type="primary"):
             with open(vector_path, "wb") as f:
                 f.write(uploaded_vector.getbuffer())
                 
-            # Leer formato vectorial (GeoJSON, KML o ZIP de Shapefile)
+            # Leer formato vectorial
             vector_gdf = None
             ext = uploaded_vector.name.split('.')[-1].lower()
             if ext in ["geojson", "json", "kml", "kmz"]:
@@ -144,25 +145,15 @@ if st.button("🚀 DESCARGAR DEM 2.5M", type="primary"):
                 with rasterio.open(output_file, "w", **out_meta) as dst:
                     dst.write(dem_data, 1)
                 
-                # Si el usuario especificó una carpeta local válida en su equipo, intentamos guardarlo allí también
-                if output_folder and os.path.exists(output_folder):
-                    try:
-                        destino_final = os.path.join(output_folder, "DEM_Real_2.5m_Syntro.tif")
-                        import shutil
-                        shutil.copyfile(output_file, destino_final)
-                        registrar_log(f"Archivo copiado exitosamente en la carpeta local: {destino_final}")
-                    except Exception as ex:
-                        registrar_log(f"No se pudo escribir en la carpeta local indicada: {str(ex)}")
-
                 progress_bar.progress(100)
                 status_label.text("⏱️ ¡Proceso finalizado con éxito!")
-                registrar_log("DEM de 2.5m generado exitosamente.")
+                registrar_log(f"DEM de 2.5m generado exitosamente para '{opcion_destino}'.")
                 
-                st.success("¡El DEM de alta resolución (2.5m) está listo!")
+                st.success("¡El DEM de alta resolución (2.5m) está listo para guardar!")
                 
                 with open(output_file, "rb") as f:
                     st.download_button(
-                        "📥 Descargar DEM 2.5m (.tif)", 
+                        "📥 Guardar y Descargar DEM 2.5m (.tif)", 
                         f, 
                         file_name="DEM_Real_2.5m_Syntro.tif", 
                         mime="image/tiff"
