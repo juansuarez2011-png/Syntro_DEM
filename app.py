@@ -170,7 +170,9 @@ if st.button("🚀 PROCESAR Y DESCARGAR DEM 2.5M (.tif)", type="primary"):
             height = int(round((b_maxy - b_miny) / res))
             transform_25m = from_bounds(b_minx, b_miny, b_maxx, b_maxy, width, height)
 
-            # ------------------- REPROYECCIÓN -------------------
+            # ============================================================
+            # REPROYECCIÓN — CAMBIO CLAVE: nearest en vez de bilinear
+            # ============================================================
             reprojected_data = np.full((1, height, width), -9999.0, dtype=np.float32)
 
             with rasterio.open(dem_url) as src:
@@ -183,15 +185,21 @@ if st.button("🚀 PROCESAR Y DESCARGAR DEM 2.5M (.tif)", type="primary"):
                     src_crs=src.crs,
                     dst_transform=transform_25m,
                     dst_crs=f"EPSG:{epsg_utm}",
-                    resampling=Resampling.bilinear,
+                    resampling=Resampling.nearest,   # 🔥 antes era bilinear → causaba -7793.37
                     src_nodata=src_nodata,
                     dst_nodata=-9999.0
                 )
 
-            # 🔥 Limpieza agresiva: la Tierra va de ~-430 m (Mar Muerto) a 8848 m (Everest)
-            reprojected_data[0][
-                (reprojected_data[0] < -500.0) | (reprojected_data[0] > 9000.0)
-            ] = -9999.0
+            # 🔥 LIMPIEZA EXTREMA: rango terrestre válido [-500, 9000]
+            mask_invalid = (reprojected_data[0] < -500.0) | (reprojected_data[0] > 9000.0)
+            reprojected_data[0][mask_invalid] = np.float32(-9999.0)
+
+            # Forzar valores nodata exactos
+            reprojected_data[0] = np.where(
+                reprojected_data[0] == np.float32(-9999.0),
+                np.float32(-9999.0),
+                reprojected_data[0]
+            ).astype(np.float32)
 
             temp_dem_path = os.path.join(temp_dir, "temp_reprojected.tif")
 
@@ -200,16 +208,20 @@ if st.button("🚀 PROCESAR Y DESCARGAR DEM 2.5M (.tif)", type="primary"):
                 height=height, width=width, count=1,
                 dtype="float32", crs=f"EPSG:{epsg_utm}",
                 transform=transform_25m, nodata=-9999.0,
-                compress="lzw"
+                compress="lzw", tiled=True,
+                blockxsize=256, blockysize=256
             ) as dst:
                 dst.write(reprojected_data)
+                dst.update_tags(nodata=-9999.0)
 
             registrar_log("Aplicando recorte vectorial exacto sobre la malla métrica...")
             progress_bar.progress(85)
 
             geom_utm = [shapely.geometry.mapping(g) for g in vector_utm.geometry]
 
-            # ------------------- RECORTE + LIMPIEZA -------------------
+            # ============================================================
+            # RECORTE + LIMPIEZA FINAL
+            # ============================================================
             with rasterio.open(temp_dem_path) as src:
                 out_image, out_transform = mask(
                     src, geom_utm, crop=True,
@@ -227,13 +239,12 @@ if st.button("🚀 PROCESAR Y DESCARGAR DEM 2.5M (.tif)", type="primary"):
                     all_touched=False
                 )
 
-                # Forzar nodata FUERA del polígono
-                out_image[0][~interior_mask] = -9999.0
+                # Forzar nodata exacto FUERA del polígono
+                out_image[0][~interior_mask] = np.float32(-9999.0)
 
                 # Volver a limpiar valores basura DENTRO del polígono
-                out_image[0][
-                    (out_image[0] < -500.0) | (out_image[0] > 9000.0)
-                ] = -9999.0
+                mask_bad = (out_image[0] < -500.0) | (out_image[0] > 9000.0)
+                out_image[0][mask_bad] = np.float32(-9999.0)
 
                 # Extraer SOLO los válidos dentro del perímetro
                 valid_pixels = out_image[0][
@@ -261,8 +272,13 @@ if st.button("🚀 PROCESAR Y DESCARGAR DEM 2.5M (.tif)", type="primary"):
                 if normalizar:
                     if max_elev > min_elev:
                         rango = max_elev - min_elev
-                        out_image[0][interior_mask] = (
-                            out_image[0][interior_mask] - min_elev
+                        interior_valid = (
+                            interior_mask
+                            & (out_image[0] > -500.0)
+                            & (out_image[0] < 9000.0)
+                        )
+                        out_image[0][interior_valid] = (
+                            out_image[0][interior_valid] - min_elev
                         ) / rango
                         registrar_log(f"🔁 DEM normalizado entre 0 y 1 (rango real = {rango:.2f} m).")
                         min_out, max_out = 0.0, 1.0
@@ -272,7 +288,9 @@ if st.button("🚀 PROCESAR Y DESCARGAR DEM 2.5M (.tif)", type="primary"):
                 else:
                     min_out, max_out = min_elev, max_elev
 
-                # ------------------- GUARDADO FINAL -------------------
+                # ============================================================
+                # GUARDADO FINAL
+                # ============================================================
                 with rasterio.open(
                     output_file, "w", driver="GTiff",
                     height=out_image.shape[1],
@@ -281,11 +299,13 @@ if st.button("🚀 PROCESAR Y DESCARGAR DEM 2.5M (.tif)", type="primary"):
                     crs=f"EPSG:{epsg_utm}",
                     transform=out_transform,
                     nodata=-9999.0,
-                    compress="lzw"
+                    compress="lzw",
+                    tiled=True,
+                    blockxsize=256,
+                    blockysize=256
                 ) as dst_out:
                     dst_out.write(out_image)
-
-                    # Tags informativos (visibles en QGIS/GeoLibre → Propiedades → Información)
+                    dst_out.set_band_description(1, "Elevación (m)")
                     dst_out.update_tags(
                         AREA_MIN=f"{min_out:.3f}",
                         AREA_MAX=f"{max_out:.3f}",
@@ -294,14 +314,56 @@ if st.button("🚀 PROCESAR Y DESCARGAR DEM 2.5M (.tif)", type="primary"):
                         NORMALIZED=str(normalizar),
                         SOURCE="Copernicus DEM GLO-30 remuestreado a 2.5m",
                         CRS=f"EPSG:{epsg_utm}",
-                        UNITS="meters" if not normalizar else "normalized_0_1",
-                        STATISTICS_MINIMUM=str(min_out),
-                        STATISTICS_MAXIMUM=str(max_out),
-                        STATISTICS_MEAN=str(mean_elev),
-                        STATISTICS_STDDEV=str(std_elev)
+                        UNITS="meters" if not normalizar else "normalized_0_1"
                     )
 
-            # ------------------- FIN -------------------
+            # ============================================================
+            # 🔥 SEGUNDO PASO: grabar estadísticas REALES ignorando nodata
+            # Esto es lo que QGIS/GeoLibre lee para el histograma
+            # ============================================================
+            with rasterio.open(output_file, "r+") as dst:
+                data_final = dst.read(1)
+                nodata_val = dst.nodata
+
+                validos_final = data_final[
+                    (data_final != nodata_val)
+                    & (data_final > -500.0)
+                    & (data_final < 9000.0)
+                ]
+
+                if validos_final.size > 0:
+                    stats_min = float(validos_final.min())
+                    stats_max = float(validos_final.max())
+                    stats_mean = float(validos_final.mean())
+                    stats_std = float(validos_final.std())
+
+                    # Tags del dataset (namespace general)
+                    dst.update_tags(
+                        STATISTICS_MINIMUM=f"{stats_min:.6f}",
+                        STATISTICS_MAXIMUM=f"{stats_max:.6f}",
+                        STATISTICS_MEAN=f"{stats_mean:.6f}",
+                        STATISTICS_STDDEV=f"{stats_std:.6f}",
+                        STATISTICS_VALID_PERCENT="100",
+                        STATISTICS_SKIP_PIXELS="0"
+                    )
+
+                    # Tags de la banda 1 (namespace que usa GDAL/QGIS)
+                    dst.update_tags(
+                        1,
+                        STATISTICS_MINIMUM=f"{stats_min:.6f}",
+                        STATISTICS_MAXIMUM=f"{stats_max:.6f}",
+                        STATISTICS_MEAN=f"{stats_mean:.6f}",
+                        STATISTICS_STDDEV=f"{stats_std:.6f}",
+                    )
+
+                    registrar_log(
+                        f"✅ Estadísticas grabadas en el GeoTIFF: "
+                        f"min={stats_min:.2f} m | max={stats_max:.2f} m"
+                    )
+
+            # ============================================================
+            # FIN
+            # ============================================================
             elapsed_time = round(time.time() - start_time, 2)
             progress_bar.progress(100)
             status_label.text(f"⏱ ¡Proceso completado en {elapsed_time} segundos!")
