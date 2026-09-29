@@ -19,9 +19,6 @@ import planetary_computer
 
 st.set_page_config(page_title="Syntro Academy - Descargador DEM 2.5m", page_icon="🛰️", layout="centered")
 
-# ============================================================
-# ESTILO VISUAL
-# ============================================================
 st.markdown("""
     <style>
     .main { background-color: #1e1e24; color: #ffffff; }
@@ -30,9 +27,6 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-# ============================================================
-# LOGO (búsqueda robusta en múltiples rutas + fallback)
-# ============================================================
 def encontrar_logo():
     candidatos = []
     try:
@@ -44,11 +38,7 @@ def encontrar_logo():
             candidatos.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), "logo.png"))
         except Exception:
             pass
-    candidatos.extend([
-        "logo.png",
-        "./logo.png",
-        "/mount/src/logo.png",
-    ])
+    candidatos.extend(["logo.png", "./logo.png", "/mount/src/logo.png"])
     for c in candidatos:
         if c and os.path.exists(c):
             return c
@@ -76,9 +66,6 @@ with col_title:
 
 st.info("Sube el perímetro de tu área de estudio (GeoJSON, KML, KMZ o Shapefile en .zip) para procesar de forma segura y descargar el DEM en formato .tif.")
 
-# ============================================================
-# ENTRADAS
-# ============================================================
 uploaded_vector = st.file_uploader(
     "Perímetro del Área de Estudio (GeoJSON, KML, KMZ, SHP en .zip)",
     type=["geojson", "json", "kml", "kmz", "zip"]
@@ -90,9 +77,6 @@ normalizar = st.checkbox(
     help="Si se activa, el DEM descargado tendrá valores entre 0 y 1 (min real = 0, max real = 1)."
 )
 
-# ============================================================
-# LOG / PROGRESO
-# ============================================================
 log_container = st.empty()
 progress_bar = st.progress(0)
 status_label = st.empty()
@@ -102,16 +86,11 @@ logs_history = []
 def registrar_log(mensaje):
     timestamp = time.strftime('%H:%M:%S')
     logs_history.append(f"[{timestamp}] {mensaje}")
-    log_container.text_area("Registro de Actividad (Log):", "\n".join(logs_history), height=180)
+    log_container.text_area("Registro de Actividad (Log):", "\n".join(logs_history), height=200)
 
-# ============================================================
-# FUNCIÓN DE CARGA VECTORIAL BLINDADA
-# ============================================================
 def _cargar_vector(path, ext_, temp_dir, registrar_log_fn):
-    """Carga un archivo vectorial con múltiples intentos y normalización."""
     gdf = None
 
-    # ---------- GeoJSON / JSON ----------
     if ext_ in ["geojson", "json"]:
         try:
             gdf = gpd.read_file(path)
@@ -119,7 +98,6 @@ def _cargar_vector(path, ext_, temp_dir, registrar_log_fn):
             registrar_log_fn(f"⚠️ Lectura directa GeoJSON falló: {e1}. Reintentando con json.loads...")
             with open(path, "r", encoding="utf-8") as f:
                 data = json.load(f)
-
             if isinstance(data, dict) and data.get("type") == "FeatureCollection":
                 gdf = gpd.GeoDataFrame.from_features(data["features"], crs="EPSG:4326")
             elif isinstance(data, dict) and data.get("type") == "Feature":
@@ -128,11 +106,9 @@ def _cargar_vector(path, ext_, temp_dir, registrar_log_fn):
                 geom = shapely.geometry.shape(data)
                 gdf = gpd.GeoDataFrame(geometry=[geom], crs="EPSG:4326")
             else:
-                raise Exception(f"Estructura JSON no reconocida: {data.get('type', 'desconocido') if isinstance(data, dict) else type(data)}")
+                raise Exception(f"Estructura JSON no reconocida.")
 
-    # ---------- KML / KMZ ----------
     elif ext_ in ["kml", "kmz"]:
-        # Habilitar drivers de Fiona
         try:
             import fiona
             fiona.drvsupport.supported_drivers['KML'] = 'rw'
@@ -141,50 +117,39 @@ def _cargar_vector(path, ext_, temp_dir, registrar_log_fn):
         except Exception:
             pass
 
-        # Intento 1: fiona con driver KML
         try:
             gdf = gpd.read_file(path, driver="KML")
             registrar_log_fn("✅ KML leído con driver KML de Fiona.")
         except Exception as e1:
             registrar_log_fn(f"⚠️ Fiona KML falló: {e1}. Probando libkml...")
-
-            # Intento 2: libkml
             try:
                 gdf = gpd.read_file(path, driver="LIBKML")
                 registrar_log_fn("✅ KML leído con driver LIBKML.")
             except Exception as e2:
                 registrar_log_fn(f"⚠️ LIBKML falló: {e2}. Probando pyogrio...")
-
-                # Intento 3: pyogrio
                 try:
                     import pyogrio
                     gdf = pyogrio.read_dataframe(path)
                     registrar_log_fn("✅ KML leído con pyogrio.")
                 except Exception as e3:
-                    registrar_log_fn(f"⚠️ pyogrio falló: {e3}. Probando con OGR...")
+                    registrar_log_fn(f"⚠️ pyogrio falló: {e3}. Probando OGR...")
+                    from osgeo import ogr
+                    ogr.UseExceptions()
+                    ds = ogr.Open(path)
+                    if ds is None:
+                        raise Exception("No se pudo abrir el KML con OGR")
+                    layer = ds.GetLayer(0)
+                    features = []
+                    for feat in layer:
+                        geom = feat.GetGeometryRef()
+                        if geom is not None:
+                            features.append(shapely.wkt.loads(geom.ExportToWkt()))
+                    ds = None
+                    if not features:
+                        raise Exception("El KML no contiene geometrías válidas")
+                    gdf = gpd.GeoDataFrame(geometry=features, crs="EPSG:4326")
+                    registrar_log_fn("✅ KML leído con OGR.")
 
-                    # Intento 4: osgeo.ogr
-                    try:
-                        from osgeo import ogr
-                        ogr.UseExceptions()
-                        ds = ogr.Open(path)
-                        if ds is None:
-                            raise Exception("No se pudo abrir el KML con OGR")
-                        layer = ds.GetLayer(0)
-                        features = []
-                        for feat in layer:
-                            geom = feat.GetGeometryRef()
-                            if geom is not None:
-                                features.append(shapely.wkt.loads(geom.ExportToWkt()))
-                        ds = None
-                        if not features:
-                            raise Exception("El KML no contiene geometrías válidas")
-                        gdf = gpd.GeoDataFrame(geometry=features, crs="EPSG:4326")
-                        registrar_log_fn("✅ KML leído con OGR.")
-                    except Exception as e4:
-                        raise Exception(f"No se pudo leer el KML con ningún método. Errores: {e1} | {e2} | {e3} | {e4}")
-
-    # ---------- SHP dentro de ZIP ----------
     elif ext_ == "zip":
         with zipfile.ZipFile(path, 'r') as zip_ref:
             zip_ref.extractall(temp_dir)
@@ -199,9 +164,6 @@ def _cargar_vector(path, ext_, temp_dir, registrar_log_fn):
 
     return gdf
 
-# ============================================================
-# BOTÓN PRINCIPAL
-# ============================================================
 if st.button("🚀 PROCESAR Y DESCARGAR DEM 2.5M (.tif)", type="primary"):
     if uploaded_vector:
         logs_history.clear()
@@ -217,19 +179,16 @@ if st.button("🚀 PROCESAR Y DESCARGAR DEM 2.5M (.tif)", type="primary"):
             with open(vector_path, "wb") as f:
                 f.write(uploaded_vector.getbuffer())
 
-            # ------------------- LECTURA VECTORIAL BLINDADA -------------------
             ext = uploaded_vector.name.split('.')[-1].lower()
             vector_gdf = _cargar_vector(vector_path, ext, temp_dir, registrar_log)
 
             if vector_gdf is None or vector_gdf.empty:
                 raise Exception("El archivo vectorial está vacío o no se pudo interpretar.")
 
-            # Eliminar filas sin geometría
             vector_gdf = vector_gdf[vector_gdf.geometry.notnull()].copy()
             if vector_gdf.empty:
                 raise Exception("No quedan geometrías válidas tras eliminar valores nulos.")
 
-            # Reparar geometrías inválidas
             try:
                 invalid_mask = ~vector_gdf.geometry.is_valid
                 if invalid_mask.any():
@@ -240,10 +199,8 @@ if st.button("🚀 PROCESAR Y DESCARGAR DEM 2.5M (.tif)", type="primary"):
             except Exception as e_fix:
                 registrar_log(f"⚠️ No se pudieron reparar algunas geometrías: {e_fix}")
 
-            # Eliminar geometrías vacías
             vector_gdf = vector_gdf[~vector_gdf.geometry.is_empty].copy()
 
-            # Convertir todo a MultiPolygon (evita problemas mixtos)
             try:
                 vector_gdf["geometry"] = vector_gdf.geometry.apply(
                     lambda g: g if g.geom_type == "MultiPolygon"
@@ -257,7 +214,6 @@ if st.button("🚀 PROCESAR Y DESCARGAR DEM 2.5M (.tif)", type="primary"):
 
             registrar_log(f"✅ Vector cargado y validado: {len(vector_gdf)} feature(s)")
 
-            # Forzar CRS
             if vector_gdf.crs is None:
                 registrar_log("⚠️ El archivo no declara CRS. Asumiendo EPSG:4326 (WGS84).")
                 vector_gdf.set_crs("EPSG:4326", inplace=True)
@@ -267,7 +223,6 @@ if st.button("🚀 PROCESAR Y DESCARGAR DEM 2.5M (.tif)", type="primary"):
             vector_wgs84 = vector_gdf.to_crs("EPSG:4326")
             west, south, east, north = vector_wgs84.total_bounds
 
-            # Cálculo UTM automático
             center_lon = (west + east) / 2.0
             center_lat = (south + north) / 2.0
             utm_zone = int((center_lon + 180) / 6) + 1
@@ -286,17 +241,20 @@ if st.button("🚀 PROCESAR Y DESCARGAR DEM 2.5M (.tif)", type="primary"):
 
             search = catalog.search(
                 collections=["cop-dem-glo-30"],
-                bbox=[west, south, east, north]
+                bbox=[west, south, east, north],
+                limit=100
             )
 
             items = list(search.item_collection())
             if not items:
                 raise Exception("No se encontraron teselas DEM para la extensión geográfica especificada.")
 
-            registrar_log("Tesela encontrada. Leyendo banda de elevación principal...")
+            registrar_log(f"📦 Teselas encontradas por STAC: {len(items)}")
+            for it in items:
+                registrar_log(f"   • {it.id}")
+
             progress_bar.progress(70)
 
-            dem_url = items[0].assets["data"].href
             output_file = os.path.join(temp_dir, "DEM_Real_2.5m_Syntro.tif")
 
             vector_utm = vector_gdf.to_crs(f"EPSG:{epsg_utm}")
@@ -312,26 +270,40 @@ if st.button("🚀 PROCESAR Y DESCARGAR DEM 2.5M (.tif)", type="primary"):
             transform_25m = from_bounds(b_minx, b_miny, b_maxx, b_maxy, width, height)
 
             # ============================================================
-            # REPROYECCIÓN — nearest evita valores intermedios
+            # FUSIÓN MULTI-TESELA
             # ============================================================
             reprojected_data = np.full((1, height, width), -9999.0, dtype=np.float32)
 
-            with rasterio.open(dem_url) as src:
-                src_nodata = src.nodata if src.nodata is not None else -9999.0
+            registrar_log(f"🌐 Fusionando {len(items)} tesela(s) del DEM en la malla métrica...")
 
-                rasterio.warp.reproject(
-                    source=rasterio.band(src, 1),
-                    destination=reprojected_data[0],
-                    src_transform=src.transform,
-                    src_crs=src.crs,
-                    dst_transform=transform_25m,
-                    dst_crs=f"EPSG:{epsg_utm}",
-                    resampling=Resampling.nearest,
-                    src_nodata=src_nodata,
-                    dst_nodata=-9999.0
-                )
+            for idx, item in enumerate(items):
+                try:
+                    dem_url = item.assets["data"].href
+                    registrar_log(f"   ↳ Procesando tesela {idx+1}/{len(items)}: {item.id}")
 
-            # Limpieza agresiva: rango terrestre válido [-500, 9000]
+                    with rasterio.open(dem_url) as src:
+                        src_nodata = src.nodata if src.nodata is not None else -9999.0
+                        tile_data = np.full((height, width), -9999.0, dtype=np.float32)
+
+                        rasterio.warp.reproject(
+                            source=rasterio.band(src, 1),
+                            destination=tile_data,
+                            src_transform=src.transform,
+                            src_crs=src.crs,
+                            dst_transform=transform_25m,
+                            dst_crs=f"EPSG:{epsg_utm}",
+                            resampling=Resampling.nearest,
+                            src_nodata=src_nodata,
+                            dst_nodata=-9999.0
+                        )
+
+                        valid_tile = (tile_data > -500.0) & (tile_data < 9000.0)
+                        reprojected_data[0][valid_tile] = tile_data[valid_tile]
+
+                except Exception as e_tile:
+                    registrar_log(f"   ⚠️ Error en tesela {item.id}: {e_tile}")
+                    continue
+
             mask_invalid = (reprojected_data[0] < -500.0) | (reprojected_data[0] > 9000.0)
             reprojected_data[0][mask_invalid] = np.float32(-9999.0)
 
@@ -348,14 +320,12 @@ if st.button("🚀 PROCESAR Y DESCARGAR DEM 2.5M (.tif)", type="primary"):
                 dst.write(reprojected_data)
                 dst.update_tags(nodata=-9999.0)
 
+            registrar_log("✅ Fusión de teselas completada.")
             registrar_log("Aplicando recorte vectorial exacto sobre la malla métrica...")
             progress_bar.progress(85)
 
             geom_utm = [shapely.geometry.mapping(g) for g in vector_utm.geometry]
 
-            # ============================================================
-            # RECORTE + LIMPIEZA FINAL
-            # ============================================================
             with rasterio.open(temp_dem_path) as src:
                 out_image, out_transform = mask(
                     src, geom_utm, crop=True,
@@ -372,10 +342,8 @@ if st.button("🚀 PROCESAR Y DESCARGAR DEM 2.5M (.tif)", type="primary"):
                     all_touched=False
                 )
 
-                # Forzar nodata exacto FUERA del polígono
                 out_image[0][~interior_mask] = np.float32(-9999.0)
 
-                # Limpiar valores basura DENTRO del polígono
                 mask_bad = (out_image[0] < -500.0) | (out_image[0] > 9000.0)
                 out_image[0][mask_bad] = np.float32(-9999.0)
 
@@ -400,7 +368,6 @@ if st.button("🚀 PROCESAR Y DESCARGAR DEM 2.5M (.tif)", type="primary"):
                 registrar_log(f"   • Desv.  : {std_elev:.2f} m")
                 registrar_log(f"   • Píxeles válidos: {valid_pixels.size:,}")
 
-                # Normalización opcional
                 if normalizar:
                     if max_elev > min_elev:
                         rango = max_elev - min_elev
@@ -420,9 +387,6 @@ if st.button("🚀 PROCESAR Y DESCARGAR DEM 2.5M (.tif)", type="primary"):
                 else:
                     min_out, max_out = min_elev, max_elev
 
-                # ============================================================
-                # GUARDADO FINAL
-                # ============================================================
                 with rasterio.open(
                     output_file, "w", driver="GTiff",
                     height=out_image.shape[1],
@@ -449,9 +413,6 @@ if st.button("🚀 PROCESAR Y DESCARGAR DEM 2.5M (.tif)", type="primary"):
                         UNITS="meters" if not normalizar else "normalized_0_1"
                     )
 
-            # ============================================================
-            # Grabar estadísticas REALES ignorando nodata
-            # ============================================================
             with rasterio.open(output_file, "r+") as dst:
                 data_final = dst.read(1)
                 nodata_val = dst.nodata
@@ -490,9 +451,6 @@ if st.button("🚀 PROCESAR Y DESCARGAR DEM 2.5M (.tif)", type="primary"):
                         f"min={stats_min:.2f} m | max={stats_max:.2f} m"
                     )
 
-            # ============================================================
-            # FIN
-            # ============================================================
             elapsed_time = round(time.time() - start_time, 2)
             progress_bar.progress(100)
             status_label.text(f"⏱ ¡Proceso completado en {elapsed_time} segundos!")
@@ -517,7 +475,6 @@ if st.button("🚀 PROCESAR Y DESCARGAR DEM 2.5M (.tif)", type="primary"):
         except Exception as e:
             error_completo = traceback.format_exc()
             registrar_log(f"❌ Error crítico: {type(e).__name__} → {str(e)}")
-            registrar_log("🔍 Detalle técnico disponible en el expandable de abajo.")
             st.error(f"Ocurrió un error en el proceso: {str(e)}")
             with st.expander("🔧 Ver detalle técnico del error (para depuración)"):
                 st.code(error_completo, language="python")
