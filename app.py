@@ -136,7 +136,7 @@ if st.button("🚀 PROCESAR Y DESCARGAR DEM 2.5M (.tif)", type="primary"):
                 vector_utm = vector_gdf.to_crs(f"EPSG:{epsg_utm}")
                 minx, miny, maxx, maxy = vector_utm.total_bounds
                 
-                # Expandir ligeramente el bounding box (100 metros) para asegurar cobertura completa al reproyectar
+                # Expandir ligeramente el bounding box (100 metros)
                 buffer_m = 100.0
                 b_minx, b_miny, b_maxx, b_maxy = minx - buffer_m, miny - buffer_m, maxx + buffer_m, maxy + buffer_m
                 
@@ -145,31 +145,25 @@ if st.button("🚀 PROCESAR Y DESCARGAR DEM 2.5M (.tif)", type="primary"):
                 height = int(round((b_maxy - b_miny) / res))
                 transform_25m = from_bounds(b_minx, b_miny, b_maxx, b_maxy, width, height)
                 
-                reprojected_data = np.zeros((1, height, width), dtype=np.float32)
+                reprojected_data = np.full((1, height, width), -9999.0, dtype=np.float32)
                 
                 with rasterio.open(dem_url) as src:
-                    # Validar si el raster tiene múltiples bandas y ubicar la de elevación real
-                    band_idx = 1
-                    for b in range(1, src.count + 1):
-                        tags = src.tags(b)
-                        # Comprobar metadatos para asegurar que sea la banda de elevación
-                        if "elev" in str(tags).lower() or src.count == 1:
-                            band_idx = b
-                            break
-                    
-                    registrar_log(f"Extrayendo datos de la banda física #{band_idx} del raster original...")
+                    src_nodata = src.nodata if src.nodata is not None else -9999.0
                     
                     rasterio.warp.reproject(
-                        source=rasterio.band(src, band_idx),
+                        source=rasterio.band(src, 1),
                         destination=reprojected_data[0],
                         src_transform=src.transform,
                         src_crs=src.crs,
                         dst_transform=transform_25m,
                         dst_crs=f"EPSG:{epsg_utm}",
                         resampling=Resampling.bilinear,
-                        src_nodata=src.nodata if src.nodata is not None else -9999.0,
+                        src_nodata=src_nodata,
                         dst_nodata=-9999.0
                     )
+                
+                # Limpiar explícitamente valores anómalos o de control negativo profundo de Copernicus
+                reprojected_data[reprojected_data < -500.0] = -9999.0
                 
                 # Guardar temporalmente el DEM reproyectado
                 temp_dem_path = os.path.join(temp_dir, "temp_reprojected.tif")
@@ -204,6 +198,9 @@ if st.button("🚀 PROCESAR Y DESCARGAR DEM 2.5M (.tif)", type="primary"):
                         nodata=-9999.0
                     )
                     
+                    # Doble seguridad: limpiar cualquier residuo fuera del polígono
+                    out_image[out_image < -500.0] = -9999.0
+                    
                     with rasterio.open(
                         output_file, 
                         "w", 
@@ -222,7 +219,7 @@ if st.button("🚀 PROCESAR Y DESCARGAR DEM 2.5M (.tif)", type="primary"):
                 elapsed_time = round(time.time() - start_time, 2)
                 progress_bar.progress(100)
                 status_label.text(f"⏱ ¡Proceso completado en {elapsed_time} segundos!")
-                registrar_log(f"DEM de elevación exportado correctamente (EPSG:{epsg_utm}).")
+                registrar_log(f"DEM de elevación exportado correctamente y sin artefactos (EPSG:{epsg_utm}).")
                 
                 st.success("¡El DEM de elevación real a 2.5m está listo para descargar!")
                 
