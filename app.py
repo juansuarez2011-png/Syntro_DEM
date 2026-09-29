@@ -19,6 +19,9 @@ import planetary_computer
 
 st.set_page_config(page_title="Syntro Academy - Descargador DEM 2.5m", page_icon="🛰️", layout="centered")
 
+# ============================================================
+# ESTILO VISUAL
+# ============================================================
 st.markdown("""
     <style>
     .main { background-color: #1e1e24; color: #ffffff; }
@@ -27,6 +30,9 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
+# ============================================================
+# LOGO (búsqueda robusta + fallback)
+# ============================================================
 def encontrar_logo():
     candidatos = []
     try:
@@ -66,6 +72,9 @@ with col_title:
 
 st.info("Sube el perímetro de tu área de estudio (GeoJSON, KML, KMZ o Shapefile en .zip) para procesar de forma segura y descargar el DEM en formato .tif.")
 
+# ============================================================
+# ENTRADAS
+# ============================================================
 uploaded_vector = st.file_uploader(
     "Perímetro del Área de Estudio (GeoJSON, KML, KMZ, SHP en .zip)",
     type=["geojson", "json", "kml", "kmz", "zip"]
@@ -77,6 +86,9 @@ normalizar = st.checkbox(
     help="Si se activa, el DEM descargado tendrá valores entre 0 y 1 (min real = 0, max real = 1)."
 )
 
+# ============================================================
+# LOG / PROGRESO
+# ============================================================
 log_container = st.empty()
 progress_bar = st.progress(0)
 status_label = st.empty()
@@ -88,9 +100,13 @@ def registrar_log(mensaje):
     logs_history.append(f"[{timestamp}] {mensaje}")
     log_container.text_area("Registro de Actividad (Log):", "\n".join(logs_history), height=200)
 
+# ============================================================
+# CARGA VECTORIAL BLINDADA
+# ============================================================
 def _cargar_vector(path, ext_, temp_dir, registrar_log_fn):
     gdf = None
 
+    # ---------- GeoJSON / JSON ----------
     if ext_ in ["geojson", "json"]:
         try:
             gdf = gpd.read_file(path)
@@ -108,6 +124,7 @@ def _cargar_vector(path, ext_, temp_dir, registrar_log_fn):
             else:
                 raise Exception("Estructura JSON no reconocida.")
 
+    # ---------- KML / KMZ ----------
     elif ext_ in ["kml", "kmz"]:
         try:
             import fiona
@@ -150,6 +167,7 @@ def _cargar_vector(path, ext_, temp_dir, registrar_log_fn):
                     gdf = gpd.GeoDataFrame(geometry=features, crs="EPSG:4326")
                     registrar_log_fn("✅ KML leído con OGR.")
 
+    # ---------- SHP en ZIP ----------
     elif ext_ == "zip":
         with zipfile.ZipFile(path, 'r') as zip_ref:
             zip_ref.extractall(temp_dir)
@@ -164,6 +182,9 @@ def _cargar_vector(path, ext_, temp_dir, registrar_log_fn):
 
     return gdf
 
+# ============================================================
+# BOTÓN PRINCIPAL
+# ============================================================
 if st.button("🚀 PROCESAR Y DESCARGAR DEM 2.5M (.tif)", type="primary"):
     if uploaded_vector:
         logs_history.clear()
@@ -179,6 +200,7 @@ if st.button("🚀 PROCESAR Y DESCARGAR DEM 2.5M (.tif)", type="primary"):
             with open(vector_path, "wb") as f:
                 f.write(uploaded_vector.getbuffer())
 
+            # ------------------- LECTURA VECTORIAL -------------------
             ext = uploaded_vector.name.split('.')[-1].lower()
             vector_gdf = _cargar_vector(vector_path, ext, temp_dir, registrar_log)
 
@@ -189,6 +211,7 @@ if st.button("🚀 PROCESAR Y DESCARGAR DEM 2.5M (.tif)", type="primary"):
             if vector_gdf.empty:
                 raise Exception("No quedan geometrías válidas tras eliminar valores nulos.")
 
+            # Reparar geometrías inválidas
             try:
                 invalid_mask = ~vector_gdf.geometry.is_valid
                 if invalid_mask.any():
@@ -201,6 +224,7 @@ if st.button("🚀 PROCESAR Y DESCARGAR DEM 2.5M (.tif)", type="primary"):
 
             vector_gdf = vector_gdf[~vector_gdf.geometry.is_empty].copy()
 
+            # Normalizar a MultiPolygon
             try:
                 vector_gdf["geometry"] = vector_gdf.geometry.apply(
                     lambda g: g if g.geom_type == "MultiPolygon"
@@ -223,6 +247,7 @@ if st.button("🚀 PROCESAR Y DESCARGAR DEM 2.5M (.tif)", type="primary"):
             vector_wgs84 = vector_gdf.to_crs("EPSG:4326")
             west, south, east, north = vector_wgs84.total_bounds
 
+            # Cálculo UTM automático
             center_lon = (west + east) / 2.0
             center_lat = (south + north) / 2.0
             utm_zone = int((center_lon + 180) / 6) + 1
@@ -326,6 +351,9 @@ if st.button("🚀 PROCESAR Y DESCARGAR DEM 2.5M (.tif)", type="primary"):
 
             geom_utm = [shapely.geometry.mapping(g) for g in vector_utm.geometry]
 
+            # ============================================================
+            # RECORTE + LIMPIEZA
+            # ============================================================
             with rasterio.open(temp_dem_path) as src:
                 out_image, out_transform = mask(
                     src, geom_utm, crop=True,
@@ -367,6 +395,7 @@ if st.button("🚀 PROCESAR Y DESCARGAR DEM 2.5M (.tif)", type="primary"):
                 registrar_log(f"   • Desv.  : {std_elev:.2f} m")
                 registrar_log(f"   • Píxeles válidos: {valid_pixels.size:,}")
 
+                # Normalización opcional
                 if normalizar:
                     if max_elev > min_elev:
                         rango = max_elev - min_elev
@@ -386,6 +415,9 @@ if st.button("🚀 PROCESAR Y DESCARGAR DEM 2.5M (.tif)", type="primary"):
                 else:
                     min_out, max_out = min_elev, max_elev
 
+                # ============================================================
+                # GUARDADO FINAL
+                # ============================================================
                 with rasterio.open(
                     output_file, "w", driver="GTiff",
                     height=out_image.shape[1],
@@ -413,7 +445,7 @@ if st.button("🚀 PROCESAR Y DESCARGAR DEM 2.5M (.tif)", type="primary"):
                     )
 
             # ============================================================
-            # Grabar estadísticas y POST-PROCESO (colorinterp + .aux.xml + .qml)
+            # ESTADÍSTICAS REALES + POST-PROCESO
             # ============================================================
             with rasterio.open(output_file, "r+") as dst:
                 data_final = dst.read(1)
@@ -451,7 +483,7 @@ if st.button("🚀 PROCESAR Y DESCARGAR DEM 2.5M (.tif)", type="primary"):
                         f"min={stats_min:.2f} m | max={stats_max:.2f} m"
                     )
 
-            # POST-PROCESO con GDAL: nodata + estadísticas + .aux.xml + .qml
+            # --- Post-proceso con GDAL: nodata + colorinterp + .aux.xml ---
             try:
                 from osgeo import gdal
                 gdal.UseExceptions()
@@ -466,15 +498,26 @@ if st.button("🚀 PROCESAR Y DESCARGAR DEM 2.5M (.tif)", type="primary"):
                     ds.FlushCache()
                     ds = None
 
-                # Colormap embebido (escala de grises real, con la rampa aplicada)
                 with rasterio.open(output_file, "r+") as dst:
                     dst.colorinterp = [ColorInterp.gray]
 
-                # .qml de estilo para QGIS/GeoLibre
-                qml_path = output_file.replace(".tif", ".qml")
+                registrar_log("✅ Nodata, estadísticas y colorinterp grabados en el GeoTIFF.")
+
+            except Exception as e_post:
+                registrar_log(f"⚠️ Post-proceso opcional falló (no crítico): {e_post}")
+
+            # ============================================================
+            # GENERAR ARCHIVO .QML (ESTILO QGIS/GEOGLIBRE)
+            # ============================================================
+            qml_path = output_file.replace(".tif", ".qml")
+            try:
                 qml_content = f"""<!DOCTYPE qgis PUBLIC 'http://mrcc.com/qgis.dtd' 'SYSTEM'>
-<qgis version="3.34" styleCategories="AllStyleCategories">
+<qgis version="3.34.0-Prizren" styleCategories="AllStyleCategories">
   <pipe>
+    <provider>
+      <resamplingStage>resamplingFilter</resamplingStage>
+      <resamplingEnabled>0</resamplingEnabled>
+    </provider>
     <rasterrenderer type="singlebandgray" opacity="1" alphaBand="-1" grayBand="1">
       <rasterTransparency>
         <singleValuePixelList>
@@ -484,25 +527,36 @@ if st.button("🚀 PROCESAR Y DESCARGAR DEM 2.5M (.tif)", type="primary"):
       <minMaxOrigin>
         <limits>MinMax</limits>
         <extent>WholeRaster</extent>
-        <statAccuracy>Estimated</statAccuracy>
+        <statAccuracy>Exact</statAccuracy>
+        <cumulativeCutLower>0.02</cumulativeCutLower>
+        <cumulativeCutUpper>0.98</cumulativeCutUpper>
       </minMaxOrigin>
       <contrastEnhancement>
         <minValue>{min_out}</minValue>
         <maxValue>{max_out}</maxValue>
         <algorithm>StretchToMinimumMaximum</algorithm>
       </contrastEnhancement>
+      <colorPalette>
+        <paletteEntry value="0" color="#000000" label="0"/>
+        <paletteEntry value="255" color="#ffffff" label="255"/>
+      </colorPalette>
     </rasterrenderer>
+    <brightnesscontrast gamma="1" brightness="0" contrast="0" />
+    <huesaturation grayscaleMode="0" />
+    <rasterresampler maxOversampling="2"/>
   </pipe>
 </qgis>
 """
                 with open(qml_path, "w", encoding="utf-8") as f_qml:
                     f_qml.write(qml_content)
+                registrar_log("🎨 Estilo .qml generado (transparencia -9999 + rango real).")
 
-                registrar_log("✅ Nodata, estadísticas y estilo .qml generados.")
+            except Exception as e_qml:
+                registrar_log(f"⚠️ No se pudo generar el .qml: {e_qml}")
 
-            except Exception as e_post:
-                registrar_log(f"⚠️ Post-proceso opcional falló (no crítico): {e_post}")
-
+            # ============================================================
+            # FIN
+            # ============================================================
             elapsed_time = round(time.time() - start_time, 2)
             progress_bar.progress(100)
             status_label.text(f"⏱ ¡Proceso completado en {elapsed_time} segundos!")
@@ -516,13 +570,38 @@ if st.button("🚀 PROCESAR Y DESCARGAR DEM 2.5M (.tif)", type="primary"):
             col2.metric("Elevación máxima", f"{max_elev:.2f} m")
             col3.metric("Rango total", f"{max_elev - min_elev:.2f} m")
 
-            with open(output_file, "rb") as f:
-                st.download_button(
-                    "📥 Descargar DEM 2.5m (.tif)",
-                    f,
-                    file_name="DEM_Real_2.5m_Syntro.tif",
-                    mime="image/tiff"
-                )
+            # ---------- DESCARGA DOBLE: TIF + QML ----------
+            col_dl1, col_dl2 = st.columns(2)
+
+            with col_dl1:
+                with open(output_file, "rb") as f:
+                    st.download_button(
+                        "📥 Descargar DEM (.tif)",
+                        f,
+                        file_name="DEM_Real_2.5m_Syntro.tif",
+                        mime="image/tiff",
+                        use_container_width=True
+                    )
+
+            with col_dl2:
+                if os.path.exists(qml_path):
+                    with open(qml_path, "rb") as f_qml:
+                        st.download_button(
+                            "🎨 Descargar estilo (.qml)",
+                            f_qml,
+                            file_name="DEM_Real_2.5m_Syntro.qml",
+                            mime="application/octet-stream",
+                            use_container_width=True
+                        )
+                else:
+                    st.info("El archivo .qml no se pudo generar.")
+
+            st.info(
+                "💡 **Tip para GeoLibre/QGIS:** Coloca el `.tif` y el `.qml` en la misma carpeta "
+                "(mismo nombre base). En GeoLibre, clic derecho en la capa → **Propiedades** → "
+                "**Cargar estilo → Desde archivo** → selecciona el `.qml`. "
+                "Con eso verás el rango real y el fondo transparente automáticamente."
+            )
 
         except Exception as e:
             error_completo = traceback.format_exc()
