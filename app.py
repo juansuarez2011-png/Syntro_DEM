@@ -134,7 +134,7 @@ if st.button("🚀 PROCESAR Y DESCARGAR DEM 2.5M (.tif)", type="primary"):
                 
                 geom_wgs84 = [shapely.geometry.mapping(g) for g in vector_wgs84.geometry]
                 
-                # 1. Recortar directamente el raster original en WGS84 usando la máscara estricta
+                # 1. Recortar directamente el raster original en WGS84
                 with rasterio.open(dem_url) as src:
                     out_image, out_transform = mask(
                         src, 
@@ -142,14 +142,14 @@ if st.button("🚀 PROCESAR Y DESCARGAR DEM 2.5M (.tif)", type="primary"):
                         crop=True, 
                         all_touched=True,
                         filled=True,
-                        nodata=-9999.0
+                        nodata=0.0
                     )
                     src_crs = src.crs
                 
-                # Limpiar cualquier valor anómalo del recorte WGS84
-                out_image[out_image < -500.0] = -9999.0
+                # Limpiar valores absurdos y fijar ceros en los bordes externos
+                out_image[(out_image < -500.0) | (out_image > 9000.0)] = 0.0
                 
-                # Guardar temporalmente este recorte puro en WGS84
+                # Guardar temporalmente el recorte en WGS84
                 temp_wgs84_path = os.path.join(temp_dir, "temp_clipped_wgs84.tif")
                 with rasterio.open(
                     temp_wgs84_path, "w",
@@ -160,14 +160,14 @@ if st.button("🚀 PROCESAR Y DESCARGAR DEM 2.5M (.tif)", type="primary"):
                     dtype="float32",
                     crs=src_crs,
                     transform=out_transform,
-                    nodata=-9999.0
+                    nodata=0.0
                 ) as dst_wgs:
                     dst_wgs.write(out_image)
                 
                 registrar_log("Reproyectando y reescalando a la malla métrica exacta de 2.5 metros en UTM...")
                 progress_bar.progress(85)
                 
-                # 2. Calcular límites métricos exactos del perimetral en UTM
+                # 2. Reproyectar a la malla métrica UTM de 2.5 metros
                 vector_utm = vector_gdf.to_crs(f"EPSG:{epsg_utm}")
                 minx, miny, maxx, maxy = vector_utm.total_bounds
                 
@@ -176,7 +176,7 @@ if st.button("🚀 PROCESAR Y DESCARGAR DEM 2.5M (.tif)", type="primary"):
                 height = int(round((maxy - miny) / res))
                 transform_25m = from_bounds(minx, miny, maxx, maxy, width, height)
                 
-                reprojected_data = np.full((1, height, width), -9999.0, dtype=np.float32)
+                reprojected_data = np.zeros((1, height, width), dtype=np.float32)
                 
                 with rasterio.open(temp_wgs84_path) as src_clip:
                     rasterio.warp.reproject(
@@ -187,23 +187,22 @@ if st.button("🚀 PROCESAR Y DESCARGAR DEM 2.5M (.tif)", type="primary"):
                         dst_transform=transform_25m,
                         dst_crs=f"EPSG:{epsg_utm}",
                         resampling=Resampling.bilinear,
-                        src_nodata=-9999.0,
-                        dst_nodata=-9999.0
+                        src_nodata=0.0,
+                        dst_nodata=0.0
                     )
                 
-                # Validación estricta de valores válidos
-                reprojected_data[reprojected_data < -500.0] = -9999.0
+                # Limpieza final de ceros flotantes
+                reprojected_data[reprojected_data < 0.0] = 0.0
                 
-                # Calcular estadísticas internas reales para que GeoLibre las lea de golpe
-                valid_mask = (reprojected_data[0] != -9999.0)
-                if np.any(valid_mask):
-                    real_min = float(np.min(reprojected_data[0][valid_mask]))
-                    real_max = float(np.max(reprojected_data[0][valid_mask]))
-                    registrar_log(f"Elevación calculada en GeoLibre -> Mínima: {real_min:.2f}m | Máxima: {real_max:.2f}m")
+                valid_pixels = reprojected_data[reprojected_data > 0.0]
+                if valid_pixels.size > 0:
+                    real_min = float(np.min(valid_pixels))
+                    real_max = float(np.max(valid_pixels))
+                    registrar_log(f"Rango altitudinal óptimo para GeoLibre -> Mín: {real_min:.2f}m | Máx: {real_max:.2f}m")
                 else:
-                    real_min, real_max = 0.0, 100.0
+                    real_min, real_max = 1.0, 100.0
 
-                # 3. Escritura final del GeoTIFF con estadísticas incrustadas para GeoLibre
+                # 3. Escritura final del GeoTIFF limpio para GeoLibre sin NoData negativo
                 with rasterio.open(
                     output_file, 
                     "w", 
@@ -214,17 +213,16 @@ if st.button("🚀 PROCESAR Y DESCARGAR DEM 2.5M (.tif)", type="primary"):
                     dtype="float32",
                     crs=f"EPSG:{epsg_utm}",
                     transform=transform_25m,
-                    nodata=-9999.0,
+                    nodata=None,
                     compress="lzw"
                 ) as dst_out:
                     dst_out.write(reprojected_data)
-                    # Inyectar estadísticas directas en la banda para que el visor las tome por defecto
                     dst_out.update_tags(1, STATISTICS_MINIMUM=str(real_min), STATISTICS_MAXIMUM=str(real_max))
 
                 elapsed_time = round(time.time() - start_time, 2)
                 progress_bar.progress(100)
                 status_label.text(f"⏱ ¡Proceso completado en {elapsed_time} segundos!")
-                registrar_log(f"DEM de 2.5m optimizado para GeoLibre (EPSG:{epsg_utm}).")
+                registrar_log(f"DEM de 2.5m listo y renderizable en GeoLibre (EPSG:{epsg_utm}).")
                 
                 st.success("¡El DEM de elevación real a 2.5m está listo para descargar!")
                 
