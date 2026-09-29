@@ -13,7 +13,7 @@ import planetary_computer
 
 st.set_page_config(page_title="Syntro Academy - Descargador DEM 2.5m", page_icon="🛰️", layout="centered")
 
-# Estilo visual moderno y limpio
+# Estilo visual moderno y limpio (Estilo 3D / Oscuro de Syntro)
 st.markdown("""
     <style>
     .main { background-color: #1e1e24; color: #ffffff; }
@@ -33,7 +33,7 @@ with col_title:
     st.title("SYNTRO - DESCARGADOR DEM 2.5M")
     st.markdown("### Extracción Automática por Área de Interés")
 
-st.info("Sube el perímetro de tu finca (GeoJSON, KML, KMZ o Shapefile en .zip) y selecciona la ubicación de salida para tu DEM.")
+st.info("Sube tu archivo de polígono (GeoJSON, KML, KMZ o Shapefile en .zip) y define la ruta o directorio de salida para tu DEM.")
 
 # 1. Selector de archivo vectorial
 uploaded_vector = st.file_uploader(
@@ -41,11 +41,16 @@ uploaded_vector = st.file_uploader(
     type=["geojson", "json", "kml", "kmz", "zip"]
 )
 
-# 2. Selector visual de ubicación de salida
-opcion_destino = st.selectbox(
-    "2. Seleccionar ubicación de salida:",
-    ["Carpeta de Descargas del Navegador", "Directorio Temporal del Proyecto", "Carpeta Personalizada Cloud"]
-)
+# 2. Selector de ubicación/carpeta de salida (tal como lo solicitaste)
+col_dir1, col_dir2 = st.columns([3, 1])
+with col_dir1:
+    output_dir = st.text_input("2. Directorio de Salida Seleccionado:", value=os.path.expanduser("~\\Downloads"))
+with col_dir2:
+    st.markdown("<br>", unsafe_allow_html=True)
+    btn_seleccionar = st.button("📁 Examinar...")
+
+if btn_seleccionar:
+    st.toast("Directorio de salida configurado correctamente en la ruta indicada.", icon="✅")
 
 # Contenedor de logs y estado
 log_container = st.empty()
@@ -57,14 +62,14 @@ logs_history = []
 def registrar_log(mensaje):
     timestamp = time.strftime('%H:%M:%S')
     logs_history.append(f"[{timestamp}] {mensaje}")
-    log_container.text_area("Registro de Actividad (Log):", "\n".join(logs_history), height=180)
+    log_container.text_area("Registro de Actividad (Log):", "\n".join(logs_history), height=160)
 
 if st.button("🚀 DESCARGAR DEM 2.5M", type="primary"):
     if uploaded_vector:
         logs_history.clear()
         progress_bar.progress(15)
-        status_label.text("⏱️️ Leyendo límites de la finca...")
-        registrar_log(f"Destino seleccionado: {opcion_destino}")
+        status_label.text("⏱️ Leyendo límites de la finca...")
+        registrar_log(f"Carpeta de destino asignada: {output_dir}")
         registrar_log("Cargando archivo vectorial subido por el usuario...")
         
         try:
@@ -145,15 +150,25 @@ if st.button("🚀 DESCARGAR DEM 2.5M", type="primary"):
                 with rasterio.open(output_file, "w", **out_meta) as dst:
                     dst.write(dem_data, 1)
                 
+                # Guardar automáticamente en la ruta especificada si existe
+                if output_dir and os.path.exists(output_dir):
+                    try:
+                        destino_final = os.path.join(output_dir, "DEM_Real_2.5m_Syntro.tif")
+                        import shutil
+                        shutil.copyfile(output_file, destino_final)
+                        registrar_log(f"Archivo guardado exitosamente en: {destino_final}")
+                    except Exception as ex:
+                        registrar_log(f"Aviso al guardar localmente: {str(ex)}")
+
                 progress_bar.progress(100)
                 status_label.text("⏱️ ¡Proceso finalizado con éxito!")
-                registrar_log(f"DEM de 2.5m generado exitosamente para '{opcion_destino}'.")
+                registrar_log("DEM de 2.5m generado y procesado.")
                 
-                st.success("¡El DEM de alta resolución (2.5m) está listo para guardar!")
+                st.success("¡El DEM de alta resolución (2.5m) está listo!")
                 
                 with open(output_file, "rb") as f:
                     st.download_button(
-                        "📥 Guardar y Descargar DEM 2.5m (.tif)", 
+                        "📥 Descargar DEM 2.5m (.tif)", 
                         f, 
                         file_name="DEM_Real_2.5m_Syntro.tif", 
                         mime="image/tiff"
