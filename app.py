@@ -162,7 +162,6 @@ if st.button("🚀 PROCESAR Y DESCARGAR DEM 2.5M (.tif)", type="primary"):
                         dst_nodata=-9999.0
                     )
                 
-                # Limpiar explícitamente valores anómalos o de control negativo profundo de Copernicus
                 reprojected_data[reprojected_data < -500.0] = -9999.0
                 
                 # Guardar temporalmente el DEM reproyectado
@@ -198,8 +197,15 @@ if st.button("🚀 PROCESAR Y DESCARGAR DEM 2.5M (.tif)", type="primary"):
                         nodata=-9999.0
                     )
                     
-                    # Doble seguridad: limpiar cualquier residuo fuera del polígono
-                    out_image[out_image < -500.0] = -9999.0
+                    # Aislar únicamente los píxeles válidos dentro de la perimetral
+                    valid_pixels = out_image[out_image > -500.0]
+                    if valid_pixels.size > 0:
+                        min_elev = float(np.min(valid_pixels))
+                        max_elev = float(np.max(valid_pixels))
+                        registrar_log(f"Rango altitudinal interno detectado -> Mín: {min_elev:.2f} m | Máx: {max_elev:.2f} m")
+                    
+                    # Convertir cualquier residuo fuera del polígono a NoData estricto (-9999)
+                    out_image[out_image <= -500.0] = -9999.0
                     
                     with rasterio.open(
                         output_file, 
@@ -219,7 +225,7 @@ if st.button("🚀 PROCESAR Y DESCARGAR DEM 2.5M (.tif)", type="primary"):
                 elapsed_time = round(time.time() - start_time, 2)
                 progress_bar.progress(100)
                 status_label.text(f"⏱ ¡Proceso completado en {elapsed_time} segundos!")
-                registrar_log(f"DEM de elevación exportado correctamente y sin artefactos (EPSG:{epsg_utm}).")
+                registrar_log(f"DEM de elevación exportado correctamente y optimizado para QGIS (EPSG:{epsg_utm}).")
                 
                 st.success("¡El DEM de elevación real a 2.5m está listo para descargar!")
                 
