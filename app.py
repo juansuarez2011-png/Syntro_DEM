@@ -126,72 +126,84 @@ if st.button("🚀 PROCESAR Y DESCARGAR DEM 2.5M (.tif)", type="primary"):
                 if not items:
                     raise Exception("No se encontraron teselas DEM para la extensión geográfica especificada.")
                 
-                registrar_log("Tesela encontrada. Procesando recorte exacto por polígono y reescalado a 2.5 metros...")
-                progress_bar.progress(75)
+                registrar_log("Tesela encontrada. Reproyectando y reescalando a celdas de 2.5 metros...")
+                progress_bar.progress(70)
                 
                 dem_url = items[0].assets["data"].href
                 output_file = os.path.join(temp_dir, "DEM_Real_2.5m_Syntro.tif")
                 
-                geom_wgs84 = [shapely.geometry.mapping(g) for g in vector_wgs84.geometry]
-                
-                with rasterio.open(dem_url) as src:
-                    out_image, out_transform = mask(
-                        src, 
-                        geom_wgs84, 
-                        crop=True, 
-                        all_touched=True,
-                        filled=True,
-                        nodata=-9999.0
-                    )
-                    src_crs = src.crs
-                
-                # Reproyección y remuestreo métrico a UTM con resolución de 2.5m
+                # Proyectar perimetral a UTM
                 vector_utm = vector_gdf.to_crs(f"EPSG:{epsg_utm}")
                 minx, miny, maxx, maxy = vector_utm.total_bounds
-                res = 2.5
-                width = int(round((maxx - minx) / res))
-                height = int(round((maxy - miny) / res))
                 
-                if width > 0 and height > 0:
-                    transform_25m = from_bounds(minx, miny, maxx, maxy, width, height)
-                    reprojected_data = np.zeros((1, height, width), dtype=np.float32)
-                    
+                # Expandir ligeramente el bounding box (100 metros) para asegurar cobertura completa al reproyectar
+                buffer_m = 100.0
+                b_minx, b_miny, b_maxx, b_maxy = minx - buffer_m, miny - buffer_m, maxx + buffer_m, maxy + buffer_m
+                
+                res = 2.5
+                width = int(round((b_maxx - b_minx) / res))
+                height = int(round((b_maxy - b_miny) / res))
+                transform_25m = from_bounds(b_minx, b_miny, b_maxx, b_maxy, width, height)
+                
+                reprojected_data = np.zeros((1, height, width), dtype=np.float32)
+                
+                with rasterio.open(dem_url) as src:
                     rasterio.warp.reproject(
-                        source=out_image,
-                        destination=reprojected_data,
-                        src_transform=out_transform,
-                        src_crs=src_crs,
+                        source=rasterio.band(src, 1),
+                        destination=reprojected_data[0],
+                        src_transform=src.transform,
+                        src_crs=src.crs,
                         dst_transform=transform_25m,
                         dst_crs=f"EPSG:{epsg_utm}",
                         resampling=Resampling.bilinear,
                         src_nodata=-9999.0,
                         dst_nodata=-9999.0
                     )
-                    dem_data = reprojected_data[0]
-                    final_transform = transform_25m
-                else:
-                    dem_data = out_image[0].astype(np.float32)
-                    final_transform = out_transform
-                    width = out_image.shape[2]
-                    height = out_image.shape[1]
-
-                out_meta = {
+                
+                # Guardar temporalmente el DEM reproyectado a 2.5m para aplicar la máscara geométrica exacta
+                temp_dem_path = os.path.join(temp_dir, "temp_reprojected.tif")
+                meta = {
                     "driver": "GTiff",
                     "height": height,
                     "width": width,
-                    "transform": final_transform,
+                    "transform": transform_25m,
                     "crs": f"EPSG:{epsg_utm}",
                     "dtype": "float32",
                     "nodata": -9999.0,
                     "compress": "lzw"
                 }
                 
+                with rasterio.open(temp_dem_path, "w", **meta) as dst:
+                    dst.write(reprojected_data)
+                
+                registrar_log("Aplicando recorte vectorial exacto sobre la malla métrica...")
+                progress_bar.progress(85)
+                
+                geom_utm = [shapely.geometry.mapping(g) for g in vector_utm.geometry]
+                
+                with rasterio.open(temp_dem_path) as src:
+                    out_image, out_transform = mask(
+                        src, 
+                        geom_utm, 
+                        crop=True, 
+                        all_touched=True,
+                        filled=True,
+                        nodata=-9999.0
+                    )
+                    out_meta = src.meta.copy()
+                
+                out_meta.update({
+                    "height": out_image.shape[1],
+                    "width": out_image.shape[2],
+                    "transform": out_transform
+                })
+                
                 with rasterio.open(output_file, "w", **out_meta) as dst:
-                    dst.write(dem_data, 1)
+                    dst.write(out_image)
 
                 elapsed_time = round(time.time() - start_time, 2)
                 progress_bar.progress(100)
-                status_label.text(f"⏱️️ ¡Proceso completado en {elapsed_time} segundos!")
+                status_label.text(f"⏱ ¡Proceso completado en {elapsed_time} segundos!")
                 registrar_log(f"DEM exportado exitosamente en formato .tif (EPSG:{epsg_utm}).")
                 
                 st.success("¡El DEM de elevación a 2.5m está listo para descargar!")
