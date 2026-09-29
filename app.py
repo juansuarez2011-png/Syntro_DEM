@@ -2,15 +2,18 @@ import streamlit as st
 import os
 import time
 import numpy as np
+import geopandas as gpd
 import rasterio
+from rasterio.mask import mask
 from rasterio.enums import Resampling
 from rasterio.transform import from_bounds
 import tempfile
+import zipfile
+import shapely.geometry
 import pystac_client
 import planetary_computer
-from pyproj import Transformer
 
-st.set_page_config(page_title="Syntro Academy - Descargador DEM 2.5m UTM", page_icon="🛰️", layout="centered")
+st.set_page_config(page_title="Syntro Academy - Descargador DEM 2.5m", page_icon="🛰️", layout="centered")
 
 # Estilo visual moderno y limpio (Estilo 3D / Oscuro de Syntro)
 st.markdown("""
@@ -21,7 +24,7 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-# Encabezado institucional
+# Encabezado institucional con logotipo Syntro
 col_logo, col_title = st.columns([1, 4])
 with col_logo:
     if os.path.exists("logo.png"):
@@ -29,38 +32,18 @@ with col_logo:
     else:
         st.write("🛰️")
 with col_title:
-    st.title("SYNTRO - DESCARGADOR DEM 2.5M (UTM)")
-    st.markdown("### Configuración Directa por Coordenadas UTM")
+    st.title("SYNTRO - DESCARGADOR DEM 2.5M")
+    st.markdown("### Extracción Automática por Archivo Perimetral")
 
-st.info("Ingresa los parámetros de tu Zona UTM y los límites en metros (Bounding Box) de tu área de estudio para procesar y descargar el DEM.")
+st.info("Sube el perímetro de tu área de estudio (GeoJSON, KML, KMZ o Shapefile en .zip) para procesar de forma segura y descargar el DEM en formato .tif.")
 
-# Configuración de Coordenadas UTM Directas
-st.markdown("#### 📐 Parámetros de Coordenadas UTM")
-col1, col2 = st.columns(2)
-with col1:
-    utm_zone = st.number_input("Zona UTM", min_value=1, max_value=60, value=18, step=1, help="Ejemplo: Zulia / Venezuela se ubica típicamente en la zona 18 o 19.")
-with col2:
-    hemisphere = st.selectbox("Hemisferio", ["Norte", "Sur"], index=0)
+# Archivo Geográfico (Entrada principal)
+uploaded_vector = st.file_uploader(
+    "Perímetro del Área de Estudio (GeoJSON, KML, KMZ, SHP en .zip)", 
+    type=["geojson", "json", "kml", "kmz", "zip"]
+)
 
-hemisphere_code = "north" if hemisphere == "Norte" else "south"
-
-# Definir EPSG UTM
-# Zonas norte: 32601-32660, Zonas sur: 32701-32760
-epsg_utm = (32600 + utm_zone) if hemisphere_code == "north" else (32700 + utm_zone)
-
-st.markdown(f"**Sistema de Referencia Activo:** `EPSG:{epsg_utm}` (UTM Zona {utm_zone} {hemisphere})")
-
-st.markdown("---")
-st.markdown("#### 📍 Límites del Área de Estudio (Coordenadas en Metros - UTM)")
-col3, col4 = st.columns(2)
-with col3:
-    xmin = st.number_input("Coordenada Este Mínima (Xmin / Metros)", value=200000.0, format="%.2f")
-    ymin = st.number_input("Coordenada Norte Mínima (Ymin / Metros)", value=1100000.0, format="%.2f")
-with col4:
-    xmax = st.number_input("Coordenada Este Máxima (Xmax / Metros)", value=210000.0, format="%.2f")
-    ymax = st.number_input("Coordenada Norte Máxima (Ymax / Metros)", value=1110000.0, format="%.2f")
-
-# Contenedor de logs y estado
+# Contenedor de logs, barra de progreso y temporizador
 log_container = st.empty()
 progress_bar = st.progress(0)
 status_label = st.empty()
@@ -72,109 +55,158 @@ def registrar_log(mensaje):
     logs_history.append(f"[{timestamp}] {mensaje}")
     log_container.text_area("Registro de Actividad (Log):", "\n".join(logs_history), height=160)
 
-# Botón para ejecutar la descarga y procesamiento del DEM
+# Botón principal de ejecución
 if st.button("🚀 PROCESAR Y DESCARGAR DEM 2.5M (.tif)", type="primary"):
-    if xmin >= xmax or ymin >= ymax:
-        st.error("Error en los límites: Los valores máximos deben ser mayores que los mínimos.")
-    else:
+    if uploaded_vector:
         logs_history.clear()
-        progress_bar.progress(15)
-        status_label.text("⏱️ Transformando coordenadas UTM a Geográficas (WGS84)...")
-        registrar_log(f"Iniciando procesamiento con EPSG:{epsg_utm}...")
+        start_time = time.time()
+        
+        progress_bar.progress(10)
+        status_label.text("⏱️ Leyendo límites del área de estudio...")
+        registrar_log("Cargando archivo vectorial subido por el usuario...")
         
         try:
-            # Transformador de UTM a WGS84 para buscar la tesela satelital global
-            transformer_to_wgs84 = Transformer.from_crs(f"EPSG:{epsg_utm}", "EPSG:4326", always_xy=True)
-            
-            # Esquinas del rectángulo UTM transformadas a grados decimales
-            lon_min, lat_min = transformer_to_wgs84.transform(xmin, ymin)
-            lon_max, lat_max = transformer_to_wgs84.transform(xmax, ymax)
-            
-            # Asegurar orden correcto de bounding box geográfica [west, south, east, north]
-            wgs84_bbox = [
-                min(lon_min, lon_max),
-                min(lat_min, lat_max),
-                max(lon_min, lon_max),
-                max(lat_min, lat_max)
-            ]
-            
-            progress_bar.progress(35)
-            registrar_log(f"BBox WGS84 calculada: {[round(c, 4) for c in wgs84_bbox]}")
-            registrar_log("Conectando con Microsoft Planetary Computer (Copernicus DEM 30m)...")
-            
-            catalog = pystac_client.Client.open(
-                "https://planetarycomputer.microsoft.com/api/stac/v1",
-                modifier=planetary_computer.sign_inplace,
-            )
-            
-            search = catalog.search(
-                collections=["cop-dem-glo-30"],
-                bbox=wgs84_bbox
-            )
-            
-            items = list(search.item_collection())
-            if not items:
-                raise Exception("No se encontraron teselas DEM para la extensión geográfica especificada.")
-            
-            registrar_log("Tesela encontrada. Extrayendo y reescalando a 2.5 metros (.tif)...")
-            progress_bar.progress(65)
-            
-            dem_url = items[0].assets["data"].href
             temp_dir = tempfile.mkdtemp()
-            output_file = os.path.join(temp_dir, f"DEM_UTM_{utm_zone}_{hemisphere.upper()}_2.5m.tif")
+            vector_path = os.path.join(temp_dir, uploaded_vector.name)
+            with open(vector_path, "wb") as f:
+                f.write(uploaded_vector.getbuffer())
+                
+            # Leer formato vectorial según extensión
+            vector_gdf = None
+            ext = uploaded_vector.name.split('.')[-1].lower()
+            if ext in ["geojson", "json", "kml", "kmz"]:
+                if ext == "kml":
+                    try:
+                        import fiona
+                        fiona.drvsupport.supported_drivers['KML'] = 'rw'
+                    except:
+                        pass
+                vector_gdf = gpd.read_file(vector_path)
+            elif ext == "zip":
+                with zipfile.ZipFile(vector_path, 'r') as zip_ref:
+                    zip_ref.extractall(temp_dir)
+                shp_files = [os.path.join(temp_dir, root, f) for root, dirs, files in os.walk(temp_dir) for f in files if f.endswith('.shp')]
+                if shp_files:
+                    vector_gdf = gpd.read_file(shp_files[0])
             
-            # Definir dimensiones y resolución de salida exactas a 2.5m en metros UTM
-            res = 2.5
-            width = int(round((xmax - xmin) / res))
-            height = int(round((ymax - ymin) / res))
-            
-            if width <= 0 or height <= 0:
-                raise Exception("Las dimensiones calculadas son inválidas. Revisa las coordenadas ingresadas.")
-            
-            transform_25m = from_bounds(xmin, ymin, xmax, ymax, width, height)
-            reprojected_data = np.zeros((1, height, width), dtype=np.float32)
-            
-            with rasterio.open(dem_url) as src:
-                rasterio.warp.reproject(
-                    source=rasterio.band(src, 1),
-                    destination=reprojected_data[0],
-                    src_transform=src.transform,
-                    src_crs=src.crs,
-                    dst_transform=transform_25m,
-                    dst_crs=f"EPSG:{epsg_utm}",
-                    resampling=Resampling.bilinear,
-                    src_nodata=-9999.0,
-                    dst_nodata=-9999.0
-                )
-            
-            out_meta = {
-                "driver": "GTiff",
-                "height": height,
-                "width": width,
-                "transform": transform_25m,
-                "crs": f"EPSG:{epsg_utm}",
-                "dtype": "float32",
-                "nodata": -9999.0,
-                "compress": "lzw"
-            }
-            
-            with rasterio.open(output_file, "w", **out_meta) as dst:
-                dst.write(reprojected_data[0], 1)
-
-            progress_bar.progress(100)
-            status_label.text("⏱️ ¡Proceso finalizado con éxito!")
-            registrar_log("DEM proyectado y guardado correctamente en coordenadas UTM.")
-            
-            st.success("¡El DEM en formato TIF (.tif) a 2.5m con referencia UTM está listo para descargar!")
-            
-            with open(output_file, "rb") as f:
-                st.download_button(
-                    "📥 Descargar DEM 2.5m (.tif)", 
-                    f, 
-                    file_name=f"DEM_UTM_Z{utm_zone}_{hemisphere.upper()}_2.5m.tif", 
-                    mime="image/tiff"
+            if vector_gdf is not None and not vector_gdf.empty:
+                progress_bar.progress(30)
+                
+                # Garantizar CRS de origen y transformar a WGS84 para consulta satelital
+                if vector_gdf.crs is None:
+                    vector_gdf.set_crs("EPSG:4326", inplace=True)
+                
+                vector_wgs84 = vector_gdf.to_crs("EPSG:4326")
+                bounds = vector_wgs84.total_bounds
+                west, south, east, north = bounds
+                
+                # Calcular zona UTM automática basada en el centroide del polígono
+                center_lon = (west + east) / 2.0
+                center_lat = (south + north) / 2.0
+                utm_zone = int((center_lon + 180) / 6) + 1
+                hemisphere = "north" if center_lat >= 0 else "south"
+                epsg_utm = 32600 + utm_zone if hemisphere == "north" else 32700 + utm_zone
+                
+                registrar_log(f"Zona UTM calculada automáticamente: EPSG:{epsg_utm} (Zona {utm_zone} {hemisphere.upper()})")
+                
+                progress_bar.progress(50)
+                registrar_log("Conectando con Microsoft Planetary Computer (Copernicus DEM 30m)...")
+                
+                catalog = pystac_client.Client.open(
+                    "https://planetarycomputer.microsoft.com/api/stac/v1",
+                    modifier=planetary_computer.sign_inplace,
                 )
                 
+                search = catalog.search(
+                    collections=["cop-dem-glo-30"],
+                    bbox=[west, south, east, north]
+                )
+                
+                items = list(search.item_collection())
+                if not items:
+                    raise Exception("No se encontraron teselas DEM para la extensión geográfica especificada.")
+                
+                registrar_log("Tesela encontrada. Procesando recorte exacto por polígono y reescalado a 2.5 metros...")
+                progress_bar.progress(75)
+                
+                dem_url = items[0].assets["data"].href
+                output_file = os.path.join(temp_dir, "DEM_Real_2.5m_Syntro.tif")
+                
+                geom_wgs84 = [shapely.geometry.mapping(g) for g in vector_wgs84.geometry]
+                
+                with rasterio.open(dem_url) as src:
+                    out_image, out_transform = mask(
+                        src, 
+                        geom_wgs84, 
+                        crop=True, 
+                        all_touched=True,
+                        filled=True,
+                        nodata=-9999.0
+                    )
+                    src_crs = src.crs
+                
+                # Reproyección y remuestreo métrico a UTM con resolución de 2.5m
+                vector_utm = vector_gdf.to_crs(f"EPSG:{epsg_utm}")
+                minx, miny, maxx, maxy = vector_utm.total_bounds
+                res = 2.5
+                width = int(round((maxx - minx) / res))
+                height = int(round((maxy - miny) / res))
+                
+                if width > 0 and height > 0:
+                    transform_25m = from_bounds(minx, miny, maxx, maxy, width, height)
+                    reprojected_data = np.zeros((1, height, width), dtype=np.float32)
+                    
+                    rasterio.warp.reproject(
+                        source=out_image,
+                        destination=reprojected_data,
+                        src_transform=out_transform,
+                        src_crs=src_crs,
+                        dst_transform=transform_25m,
+                        dst_crs=f"EPSG:{epsg_utm}",
+                        resampling=Resampling.bilinear,
+                        src_nodata=-9999.0,
+                        dst_nodata=-9999.0
+                    )
+                    dem_data = reprojected_data[0]
+                    final_transform = transform_25m
+                else:
+                    dem_data = out_image[0].astype(np.float32)
+                    final_transform = out_transform
+                    width = out_image.shape[2]
+                    height = out_image.shape[1]
+
+                out_meta = {
+                    "driver": "GTiff",
+                    "height": height,
+                    "width": width,
+                    "transform": final_transform,
+                    "crs": f"EPSG:{epsg_utm}",
+                    "dtype": "float32",
+                    "nodata": -9999.0,
+                    "compress": "lzw"
+                }
+                
+                with rasterio.open(output_file, "w", **out_meta) as dst:
+                    dst.write(dem_data, 1)
+
+                elapsed_time = round(time.time() - start_time, 2)
+                progress_bar.progress(100)
+                status_label.text(f"⏱️️ ¡Proceso completado en {elapsed_time} segundos!")
+                registrar_log(f"DEM exportado exitosamente en formato .tif (EPSG:{epsg_utm}).")
+                
+                st.success("¡El DEM de elevación a 2.5m está listo para descargar!")
+                
+                with open(output_file, "rb") as f:
+                    st.download_button(
+                        "📥 Descargar DEM 2.5m (.tif)", 
+                        f, 
+                        file_name="DEM_Perimetral_2.5m_Syntro.tif", 
+                        mime="image/tiff"
+                    )
+            else:
+                st.error("El archivo vectorial subido está vacío o no se pudo interpretar correctamente.")
         except Exception as e:
-            registrar_log(f"Error: {str(e)}")
+            registrar_log(f"Error crítico: {str(e)}")
             st.error(f"Ocurrió un error en el proceso: {str(e)}")
+    else:
+        st.warning("Por favor, sube el archivo con el perímetro de tu área de estudio antes de procesar.")
