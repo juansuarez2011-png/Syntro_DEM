@@ -7,7 +7,7 @@ import numpy as np
 import geopandas as gpd
 import rasterio
 from rasterio.mask import mask
-from rasterio.enums import Resampling
+from rasterio.enums import Resampling, ColorInterp
 from rasterio.transform import from_bounds
 from rasterio.features import geometry_mask
 import tempfile
@@ -106,7 +106,7 @@ def _cargar_vector(path, ext_, temp_dir, registrar_log_fn):
                 geom = shapely.geometry.shape(data)
                 gdf = gpd.GeoDataFrame(geometry=[geom], crs="EPSG:4326")
             else:
-                raise Exception(f"Estructura JSON no reconocida.")
+                raise Exception("Estructura JSON no reconocida.")
 
     elif ext_ in ["kml", "kmz"]:
         try:
@@ -343,7 +343,6 @@ if st.button("🚀 PROCESAR Y DESCARGAR DEM 2.5M (.tif)", type="primary"):
                 )
 
                 out_image[0][~interior_mask] = np.float32(-9999.0)
-
                 mask_bad = (out_image[0] < -500.0) | (out_image[0] > 9000.0)
                 out_image[0][mask_bad] = np.float32(-9999.0)
 
@@ -413,6 +412,9 @@ if st.button("🚀 PROCESAR Y DESCARGAR DEM 2.5M (.tif)", type="primary"):
                         UNITS="meters" if not normalizar else "normalized_0_1"
                     )
 
+            # ============================================================
+            # Grabar estadísticas y POST-PROCESO (colorinterp + .aux.xml + .qml)
+            # ============================================================
             with rasterio.open(output_file, "r+") as dst:
                 data_final = dst.read(1)
                 nodata_val = dst.nodata
@@ -437,7 +439,6 @@ if st.button("🚀 PROCESAR Y DESCARGAR DEM 2.5M (.tif)", type="primary"):
                         STATISTICS_VALID_PERCENT="100",
                         STATISTICS_SKIP_PIXELS="0"
                     )
-
                     dst.update_tags(
                         1,
                         STATISTICS_MINIMUM=f"{stats_min:.6f}",
@@ -445,11 +446,62 @@ if st.button("🚀 PROCESAR Y DESCARGAR DEM 2.5M (.tif)", type="primary"):
                         STATISTICS_MEAN=f"{stats_mean:.6f}",
                         STATISTICS_STDDEV=f"{stats_std:.6f}",
                     )
-
                     registrar_log(
-                        f"✅ Estadísticas grabadas en el GeoTIFF: "
+                        f"✅ Estadísticas grabadas: "
                         f"min={stats_min:.2f} m | max={stats_max:.2f} m"
                     )
+
+            # POST-PROCESO con GDAL: nodata + estadísticas + .aux.xml + .qml
+            try:
+                from osgeo import gdal
+                gdal.UseExceptions()
+
+                ds = gdal.Open(output_file, gdal.GA_Update)
+                if ds is not None:
+                    band = ds.GetRasterBand(1)
+                    band.SetNoDataValue(-9999.0)
+                    band.ComputeStatistics(False)
+                    band.SetMetadataItem("STATISTICS_MINIMUM", f"{min_out:.6f}")
+                    band.SetMetadataItem("STATISTICS_MAXIMUM", f"{max_out:.6f}")
+                    ds.FlushCache()
+                    ds = None
+
+                # Colormap embebido (escala de grises real, con la rampa aplicada)
+                with rasterio.open(output_file, "r+") as dst:
+                    dst.colorinterp = [ColorInterp.gray]
+
+                # .qml de estilo para QGIS/GeoLibre
+                qml_path = output_file.replace(".tif", ".qml")
+                qml_content = f"""<!DOCTYPE qgis PUBLIC 'http://mrcc.com/qgis.dtd' 'SYSTEM'>
+<qgis version="3.34" styleCategories="AllStyleCategories">
+  <pipe>
+    <rasterrenderer type="singlebandgray" opacity="1" alphaBand="-1" grayBand="1">
+      <rasterTransparency>
+        <singleValuePixelList>
+          <pixelListEntry min="-9999" max="-9999" percentTransparent="100"/>
+        </singleValuePixelList>
+      </rasterTransparency>
+      <minMaxOrigin>
+        <limits>MinMax</limits>
+        <extent>WholeRaster</extent>
+        <statAccuracy>Estimated</statAccuracy>
+      </minMaxOrigin>
+      <contrastEnhancement>
+        <minValue>{min_out}</minValue>
+        <maxValue>{max_out}</maxValue>
+        <algorithm>StretchToMinimumMaximum</algorithm>
+      </contrastEnhancement>
+    </rasterrenderer>
+  </pipe>
+</qgis>
+"""
+                with open(qml_path, "w", encoding="utf-8") as f_qml:
+                    f_qml.write(qml_content)
+
+                registrar_log("✅ Nodata, estadísticas y estilo .qml generados.")
+
+            except Exception as e_post:
+                registrar_log(f"⚠️ Post-proceso opcional falló (no crítico): {e_post}")
 
             elapsed_time = round(time.time() - start_time, 2)
             progress_bar.progress(100)
