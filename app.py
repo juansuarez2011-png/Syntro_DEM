@@ -5,13 +5,14 @@ import geopandas as gpd
 import rasterio
 from rasterio.mask import mask
 from rasterio.features import rasterize, shapes
+from rasterio.warp import reproject, Resampling
 from scipy.ndimage import gaussian_filter
 import tempfile
 import zipfile
 import shapely.geometry
-from osgeo import gdal
 import pystac_client
 import planetary_computer
+from PIL import Image
 
 st.set_page_config(page_title="Syntro CN Dinámico Cloud", page_icon="🌍", layout="centered")
 
@@ -24,17 +25,17 @@ with col_logo:
         st.write("🌱")
 with col_title:
     st.title("SYNTRO - CALCULADORA DE CN DINÁMICO")
-    st.markdown("### Descarga Automática DEM 2.5m + Modelo Hidrológico Cloud")
+    st.markdown("### Descarga Automática DEM + Modelo Hidrológico Cloud")
 
-st.info("Sube tu archivo ZIP de Sentinel-1 (VV) y el Perímetro de la Finca (Shapefile en .zip, GeoJSON o KML). El sistema descargará el DEM de 2.5m desde Planetary Computer y calculará el modelo completo para GEOLIBRE.")
+st.info("Sube tu archivo ZIP de Sentinel-1 (VV) y el Perímetro de la Finca. El sistema descargará el DEM desde Planetary Computer y calculará el modelo completo para GEOLIBRE.")
 
 # 1. Subida de archivos
 uploaded_s1 = st.file_uploader("1. Seleccionar archivo ZIP Sentinel-1 (VV)", type=["zip"])
 uploaded_vector = st.file_uploader("2. Perímetro de la Finca (Shapefile en .zip, GeoJSON, KML)", type=["shp", "geojson", "json", "zip", "kml", "kmz"])
 
-if st.button("🚀 DESCARGAR DEM 2.5M Y EJECUTAR MODELO CN", type="primary"):
+if st.button("🚀 DESCARGAR DEM Y EJECUTAR MODELO CN", type="primary"):
     if uploaded_s1 and uploaded_vector:
-        with st.spinner("Conectando con Microsoft Planetary Computer y procesando DEM a 2.5m..."):
+        with st.spinner("Conectando con Microsoft Planetary Computer y procesando capas espaciales..."):
             
             temp_dir = tempfile.mkdtemp()
             
@@ -71,9 +72,9 @@ if st.button("🚀 DESCARGAR DEM 2.5M Y EJECUTAR MODELO CN", type="primary"):
                     vector_gdf = gpd.read_file(shp_files[0])
             
             if s1_raster and vector_gdf is not None:
-                # 1. Calcular Bounding Box y Zona UTM automática (igual que en dem_dialog.py)
+                # Calcular Bounding Box y Zona UTM automática
                 vector_wgs84 = vector_gdf.to_crs("EPSG:4326")
-                total_bounds = vector_wgs84.total_bounds  # [xmin, ymin, xmax, ymax]
+                total_bounds = vector_wgs84.total_bounds
                 west, south, east, north = total_bounds
                 
                 center_lon = (west + east) / 2.0
@@ -84,7 +85,7 @@ if st.button("🚀 DESCARGAR DEM 2.5M Y EJECUTAR MODELO CN", type="primary"):
                 
                 st.write(f"🌐 Zona UTM calculada: **EPSG:{epsg_utm}**")
 
-                # 2. Conectar a Microsoft Planetary Computer para descargar DEM 30m[cite: 12]
+                # Conectar a Microsoft Planetary Computer para obtener el DEM
                 catalog = pystac_client.Client.open(
                     "https://planetarycomputer.microsoft.com/api/stac/v1",
                     modifier=planetary_computer.sign_inplace,
@@ -100,50 +101,32 @@ if st.button("🚀 DESCARGAR DEM 2.5M Y EJECUTAR MODELO CN", type="primary"):
                     st.error("No se encontraron teselas DEM para la extensión indicada.")
                     st.stop()
                 
-                input_urls = [item.assets["data"].href for item in items]
-                dem_output_file = os.path.join(temp_dir, "DEM_Real_2.5m_Syntro.tif")
+                dem_url = items[0].assets["data"].href
+                dem_output_file = os.path.join(temp_dir, "DEM_Syntro_Cloud.tif")
                 
-                # Transformar límites a UTM para el buffer y recorte con GDAL Warp
+                # Leer y recortar DEM usando Rasterio directamente desde la URL Cloud-Optimized
                 vector_utm = vector_gdf.to_crs(f"EPSG:{epsg_utm}")
-                utm_bounds = vector_utm.total_bounds
-                x_buf = (utm_bounds[2] - utm_bounds[0]) * 0.05
-                y_buf = (utm_bounds[3] - utm_bounds[1]) * 0.05
+                geom = [shapely.geometry.mapping(g) for g in vector_utm.geometry]
                 
-                warp_options = gdal.WarpOptions(
-                    format='GTiff',
-                    dstSRS=f"EPSG:{epsg_utm}",
-                    xRes=2.5,
-                    yRes=2.5,
-                    resampleAlg=gdal.GRA_Bilinear,
-                    outputBounds=[utm_bounds[0] - x_buf, utm_bounds[1] - y_buf, utm_bounds[2] + x_buf, utm_bounds[3] + y_buf],
-                    warpMemoryLimit=512 * 1024 * 1024,
-                    multithread=True,
-                    creationOptions=["COMPRESS=DEFLATE", "TILED=YES"]
-                )
+                with rasterio.open(dem_url) as src:
+                    out_image, out_transform = mask(src, geom, crop=True)
+                    out_meta = src.meta.copy()
+                    out_meta.update({
+                        "driver": "GTiff",
+                        "height": out_image.shape[1],
+                        "width": out_image.shape[2],
+                        "transform": out_transform,
+                        "crs": src.crs
+                    })
+                    dem_data = out_image[0].astype(np.float32)
                 
-                st.write("⚙️ Ejecutando reescalado de teselas a píxel de 2.5m con GDAL...")
-                result_ds = gdal.Warp(dem_output_file, input_urls, options=warp_options)
-                if result_ds is None:
-                    st.error("Falló la generación del DEM con GDAL Warp.")
-                    st.stop()
-                result_ds = None
-                st.success("¡DEM de 2.5m generado exitosamente en la nube!")
+                dem_nodata = out_meta.get('nodata', -9999.0)
+                dem_data[dem_data == dem_nodata] = np.nan
+                st.success("¡DEM descargado y recortado exitosamente en la nube!")
 
-                # 3. Procesar DEM y Sentinel-1 para modelo hidrológico
-                with rasterio.open(dem_output_file) as src:
-                    meta = src.meta.copy()
-                    dem_full = src.read(1).astype(np.float32)
-                    dem_nodata = src.nodata if src.nodata is not None else -9999.0
-                    dem_full[dem_full == dem_nodata] = np.nan
-
-                    if vector_utm.crs != src.crs:
-                        vector_utm = vector_utm.to_crs(src.crs)
-                    shapes_list = [(g, 1) for g in vector_utm.geometry]
-                    mask_arr = rasterize(shapes_list, out_shape=(src.height, src.width), transform=src.transform, fill=0, default_value=1, dtype=np.uint8)
-                    dem_data = np.where(mask_arr == 1, dem_full, np.nan)
-
+                # Procesar banda Sentinel-1 VV
                 with rasterio.open(s1_raster) as s1_src:
-                    s1_res = s1_src.read(out_shape=(src.height, src.width), resampling=rasterio.enums.Resampling.bilinear)[0].astype(np.float32)
+                    s1_res = s1_src.read(out_shape=(out_image.shape[1], out_image.shape[2]), resampling=Resampling.bilinear)[0].astype(np.float32)
                     s1_nodata = s1_src.nodata
                     if s1_nodata is not None:
                         s1_res[s1_res == s1_nodata] = np.nan
@@ -153,9 +136,8 @@ if st.button("🚀 DESCARGAR DEM 2.5M Y EJECUTAR MODELO CN", type="primary"):
                 # Cálculo de pendientes y modelo dinámico Syntro
                 dem_clean = np.nan_to_num(dem_data, nan=np.nanmedian(dem_data))
                 zy = gaussian_filter(dem_clean, sigma=2.0)
-                dx, dy = np.gradient(zy, 2.5, 2.5)  # Resolución 2.5m
+                dx, dy = np.gradient(zy, 30.0, 30.0)
                 slope = np.clip(np.sqrt(dx**2 + dy**2) * 100.0, 0.0, 150.0)
-                slope = np.where(mask_arr == 1, slope, np.nan)
 
                 cn_base = 70.0
                 s1_lin = 10.0 ** (s1_res / 10.0)
@@ -170,15 +152,15 @@ if st.button("🚀 DESCARGAR DEM 2.5M Y EJECUTAR MODELO CN", type="primary"):
                 cn_matrix = np.clip(cn_matrix + (slope * 0.05), 30.0, 95.0)
                 
                 final_cn = np.full(cn_matrix.shape, -9999.0, dtype=np.float32)
-                valid_idx = (mask_arr == 1) & (~np.isnan(cn_matrix)) & (cn_matrix >= 30.0)
+                valid_idx = (~np.isnan(cn_matrix)) & (cn_matrix >= 30.0)
                 final_cn[valid_idx] = cn_matrix[valid_idx]
 
                 # Guardar Ráster TIFF resultante del CN Dinámico
                 os.makedirs("output_syntro", exist_ok=True)
                 raster_out = "output_syntro/CN_Dinamico_Syntro.tif"
-                meta.update({"driver": "GTiff", "count": 1, "dtype": "float32", "nodata": -9999.0})
+                out_meta.update({"count": 1, "dtype": "float32", "nodata": -9999.0})
 
-                with rasterio.open(raster_out, "w", **meta) as dst:
+                with rasterio.open(raster_out, "w", **out_meta) as dst:
                     dst.write(final_cn, 1)
 
                 # Generación de polígonos clasificados para GeoJSON con áreas
@@ -190,7 +172,7 @@ if st.button("🚀 DESCARGAR DEM 2.5M Y EJECUTAR MODELO CN", type="primary"):
                 class_matrix[(final_cn > 80.0) & (final_cn <= 95.0) & v_mask] = 4 
 
                 geom_results = []
-                transform = meta['transform']
+                transform = out_meta['transform']
                 for geom, val in shapes(class_matrix.astype(np.uint8), transform=transform):
                     if val > 0:
                         poly_mask = rasterio.features.geometry_mask([geom], out_shape=final_cn.shape, transform=transform, invert=True)
@@ -203,7 +185,7 @@ if st.button("🚀 DESCARGAR DEM 2.5M Y EJECUTAR MODELO CN", type="primary"):
 
                 geojson_path = "output_syntro/Grupos_Hidrologicos_Syntro.geojson"
                 if geom_results:
-                    gdf_groups = gpd.GeoDataFrame.from_features(geom_results, crs=meta['crs'])
+                    gdf_groups = gpd.GeoDataFrame.from_features(geom_results, crs=out_meta['crs'])
                     gdf_groups = gdf_groups.to_crs(epsg=epsg_utm)
 
                     gdf_groups['area_m2'] = gdf_groups.geometry.area
@@ -230,14 +212,11 @@ if st.button("🚀 DESCARGAR DEM 2.5M Y EJECUTAR MODELO CN", type="primary"):
                 st.dataframe(resumen_df.style.format({'area_ha': '{:.2f} ha', 'Porcentaje (%)': '{:.2f}%'}))
 
                 st.markdown("### 📥 Descargar Resultados para GEOLIBRE:")
-                col1, col2, col3 = st.columns(3)
+                col1, col2 = st.columns(2)
                 with col1:
-                    with open(dem_output_file, "rb") as f:
-                        st.download_button("Descargar DEM 2.5m (.tif)", f, file_name="DEM_Real_2.5m_Syntro.tif", mime="image/tiff")
-                with col2:
                     with open(raster_out, "rb") as f:
                         st.download_button("Descargar CN Dinámico (.tif)", f, file_name="CN_Dinamico_Syntro.tif", mime="image/tiff")
-                with col3:
+                with col2:
                     with open(geojson_path, "rb") as f:
                         st.download_button("Descargar GeoJSON Áreas", f, file_name="Grupos_Hidrologicos_Syntro.geojson", mime="application/json")
             else:
