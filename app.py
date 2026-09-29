@@ -5,6 +5,8 @@ import numpy as np
 import geopandas as gpd
 import rasterio
 from rasterio.mask import mask
+from rasterio.enums import Resampling
+from rasterio.transform import from_bounds
 import tempfile
 import zipfile
 import shapely.geometry
@@ -35,7 +37,7 @@ with col_title:
 
 st.info("Configura la ruta de salida, sube el perímetro de tu finca (GeoJSON, KML, KMZ o Shapefile en .zip) y ejecuta la descarga.")
 
-# 1. Selección de la ubicación o carpeta de salida primero
+# 1. Configuración de Destino
 st.markdown("### 1. Configuración de Destino")
 col_dir1, col_dir2 = st.columns([3, 1])
 with col_dir1:
@@ -47,7 +49,7 @@ with col_dir2:
 if btn_seleccionar:
     st.toast("Ruta de destino establecida correctamente.", icon="✅")
 
-# 2. Selector de archivo vectorial
+# 2. Archivo Geográfico
 st.markdown("### 2. Archivo Geográfico")
 uploaded_vector = st.file_uploader(
     "Perímetro de la Finca (GeoJSON, KML, KMZ, SHP en .zip)", 
@@ -127,7 +129,7 @@ if st.button("🚀 DESCARGAR DEM 2.5M", type="primary"):
                 if not items:
                     raise Exception("No se encontraron teselas DEM para la extensión geográfica especificada.")
                 
-                registrar_log(f"Tesela encontrada. Procesando recorte y reescalado a 2.5 metros...")
+                registrar_log("Tesela encontrada. Procesando recorte y reescalado a resolución de 2.5 metros (.tif)...")
                 progress_bar.progress(80)
                 
                 dem_url = items[0].assets["data"].href
@@ -136,19 +138,58 @@ if st.button("🚀 DESCARGAR DEM 2.5M", type="primary"):
                 vector_utm = vector_gdf.to_crs(f"EPSG:{epsg_utm}")
                 geom = [shapely.geometry.mapping(g) for g in vector_utm.geometry]
                 
+                # Recorte, reproyección y remuestreo a 2.5m en formato GeoTIFF (.tif)
                 with rasterio.open(dem_url) as src:
-                    out_image, out_transform = mask(src, geom, crop=True)
+                    out_image, out_transform = mask(
+                        src, 
+                        geom, 
+                        crop=True, 
+                        all_touched=True,
+                        filled=True,
+                        nodata=-9999.0
+                    )
+                    
+                    # Remuestreo de la celda a 2.5m si la resolución original es mayor
+                    # Calculamos las nuevas dimensiones basadas en una resolución de salida de 2.5 metros
+                    minx, miny, maxx, maxy = vector_utm.total_bounds
+                    res = 2.5
+                    width = int(round((maxx - minx) / res))
+                    height = int(round((maxy - miny) / res))
+                    
+                    if width > 0 and height > 0:
+                        transform_25m = from_bounds(minx, miny, maxx, maxy, width, height)
+                        reprojected_data = np.zeros((1, height, width), dtype=np.float32)
+                        
+                        rasterio.warp.reproject(
+                            source=out_image,
+                            destination=reprojected_data,
+                            src_transform=out_transform,
+                            src_crs=src.crs,
+                            dst_transform=transform_25m,
+                            dst_crs=f"EPSG:{epsg_utm}",
+                            resampling=Resampling.bilinear,
+                            src_nodata=-9999.0,
+                            dst_nodata=-9999.0
+                        )
+                        dem_data = reprojected_data[0]
+                        final_transform = transform_25m
+                    else:
+                        dem_data = out_image[0].astype(np.float32)
+                        final_transform = out_transform
+                        width = out_image.shape[2]
+                        height = out_image.shape[1]
+
                     out_meta = src.meta.copy()
                     out_meta.update({
                         "driver": "GTiff",
-                        "height": out_image.shape[1],
-                        "width": out_image.shape[2],
-                        "transform": out_transform,
-                        "crs": src.crs,
+                        "height": height,
+                        "width": width,
+                        "transform": final_transform,
+                        "crs": f"EPSG:{epsg_utm}",
                         "dtype": "float32",
-                        "nodata": -9999.0
+                        "nodata": -9999.0,
+                        "compress": "lzw"
                     })
-                    dem_data = out_image[0].astype(np.float32)
                 
                 with rasterio.open(output_file, "w", **out_meta) as dst:
                     dst.write(dem_data, 1)
@@ -165,9 +206,9 @@ if st.button("🚀 DESCARGAR DEM 2.5M", type="primary"):
 
                 progress_bar.progress(100)
                 status_label.text("⏱️ ¡Proceso finalizado con éxito!")
-                registrar_log("DEM de 2.5m generado y procesado.")
+                registrar_log("DEM de 2.5m exportado en formato TIF correctamente.")
                 
-                st.success("¡El DEM de alta resolución (2.5m) está listo!")
+                st.success("¡El DEM en formato TIF (.tif) a 2.5m está listo para GEOLIBRE!")
                 
                 with open(output_file, "rb") as f:
                     st.download_button(
