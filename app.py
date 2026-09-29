@@ -160,20 +160,22 @@ if st.button("🚀 PROCESAR Y DESCARGAR DEM 2.5M (.tif)", type="primary"):
                         dst_nodata=-9999.0
                     )
                 
-                # Guardar temporalmente el DEM reproyectado a 2.5m para aplicar la máscara geométrica exacta
+                # Guardar temporalmente el DEM reproyectado especificando explícitamente el band count (count=1)
                 temp_dem_path = os.path.join(temp_dir, "temp_reprojected.tif")
-                meta = {
-                    "driver": "GTiff",
-                    "height": height,
-                    "width": width,
-                    "transform": transform_25m,
-                    "crs": f"EPSG:{epsg_utm}",
-                    "dtype": "float32",
-                    "nodata": -9999.0,
-                    "compress": "lzw"
-                }
                 
-                with rasterio.open(temp_dem_path, "w", **meta) as dst:
+                with rasterio.open(
+                    temp_dem_path, 
+                    "w", 
+                    driver="GTiff",
+                    height=height,
+                    width=width,
+                    count=1,
+                    dtype="float32",
+                    crs=f"EPSG:{epsg_utm}",
+                    transform=transform_25m,
+                    nodata=-9999.0,
+                    compress="lzw"
+                ) as dst:
                     dst.write(reprojected_data)
                 
                 registrar_log("Aplicando recorte vectorial exacto sobre la malla métrica...")
@@ -190,16 +192,21 @@ if st.button("🚀 PROCESAR Y DESCARGAR DEM 2.5M (.tif)", type="primary"):
                         filled=True,
                         nodata=-9999.0
                     )
-                    out_meta = src.meta.copy()
-                
-                out_meta.update({
-                    "height": out_image.shape[1],
-                    "width": out_image.shape[2],
-                    "transform": out_transform
-                })
-                
-                with rasterio.open(output_file, "w", **out_meta) as dst:
-                    dst.write(out_image)
+                    
+                    with rasterio.open(
+                        output_file, 
+                        "w", 
+                        driver="GTiff",
+                        height=out_image.shape[1],
+                        width=out_image.shape[2],
+                        count=1,
+                        dtype="float32",
+                        crs=f"EPSG:{epsg_utm}",
+                        transform=out_transform,
+                        nodata=-9999.0,
+                        compress="lzw"
+                    ) as dst_out:
+                        dst_out.write(out_image)
 
                 elapsed_time = round(time.time() - start_time, 2)
                 progress_bar.progress(100)
