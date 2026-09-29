@@ -1,9 +1,9 @@
 streamlit
 numpy
-rasterio
 geopandas
-scipy
-pillow
+rasterio
 shapely
 pystac-client
 planetary-computer
+fiona
+pyogrio
