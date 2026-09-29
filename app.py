@@ -381,8 +381,9 @@ if st.button("🚀 PROCESAR Y DESCARGAR DEM 2.5M (.tif)", type="primary"):
             st.warning(
                 "⚠️ **IMPORTANTE para GeoLibre:** El ZIP contiene el `.tif` y el `.qml`. "
                 "**Descomprime el ZIP en una carpeta** y luego en GeoLibre: "
-                "clic derecho en la capa → **Propiedades** → **Cargar estilo → Desde archivo** → "
-                "selecciona el `.qml`. Con eso verás el DEM **igual que en QGIS**."
+                "**Capa → Añadir capa → Añadir capa ráster** → selecciona el `.tif`. "
+                "Después: clic derecho en la capa → **Propiedades** → **Cargar estilo → Desde archivo** → "
+                "selecciona el `.qml`."
             )
 
         except Exception as e:
