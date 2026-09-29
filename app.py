@@ -7,6 +7,7 @@ import rasterio
 from rasterio.mask import mask
 from rasterio.enums import Resampling
 from rasterio.transform import from_bounds
+from rasterio.features import geometry_mask
 import tempfile
 import zipfile
 import shapely.geometry
@@ -15,7 +16,6 @@ import planetary_computer
 
 st.set_page_config(page_title="Syntro Academy - Descargador DEM 2.5m", page_icon="🛰️", layout="centered")
 
-# Estilo visual moderno y limpio (Estilo 3D / Oscuro de Syntro)
 st.markdown("""
     <style>
     .main { background-color: #1e1e24; color: #ffffff; }
@@ -24,7 +24,6 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-# Encabezado institucional con logotipo Syntro
 col_logo, col_title = st.columns([1, 4])
 with col_logo:
     if os.path.exists("logo.png"):
@@ -37,13 +36,18 @@ with col_title:
 
 st.info("Sube el perímetro de tu área de estudio (GeoJSON, KML, KMZ o Shapefile en .zip) para procesar de forma segura y descargar el DEM en formato .tif.")
 
-# Archivo Geográfico (Entrada principal)
 uploaded_vector = st.file_uploader(
     "Perímetro del Área de Estudio (GeoJSON, KML, KMZ, SHP en .zip)", 
     type=["geojson", "json", "kml", "kmz", "zip"]
 )
 
-# Contenedor de logs, barra de progreso y temporizador
+# NUEVO: opción de normalización
+normalizar = st.checkbox(
+    "Normalizar elevaciones entre 0 y 1 (solo dentro del perímetro)",
+    value=False,
+    help="Si se activa, el DEM descargado tendrá valores entre 0 y 1 (min real = 0, max real = 1). Útil para análisis relativos."
+)
+
 log_container = st.empty()
 progress_bar = st.progress(0)
 status_label = st.empty()
@@ -55,7 +59,6 @@ def registrar_log(mensaje):
     logs_history.append(f"[{timestamp}] {mensaje}")
     log_container.text_area("Registro de Actividad (Log):", "\n".join(logs_history), height=160)
 
-# Botón principal de ejecución
 if st.button("🚀 PROCESAR Y DESCARGAR DEM 2.5M (.tif)", type="primary"):
     if uploaded_vector:
         logs_history.clear()
@@ -71,7 +74,6 @@ if st.button("🚀 PROCESAR Y DESCARGAR DEM 2.5M (.tif)", type="primary"):
             with open(vector_path, "wb") as f:
                 f.write(uploaded_vector.getbuffer())
                 
-            # Leer formato vectorial según extensión
             vector_gdf = None
             ext = uploaded_vector.name.split('.')[-1].lower()
             if ext in ["geojson", "json", "kml", "kmz"]:
@@ -92,7 +94,6 @@ if st.button("🚀 PROCESAR Y DESCARGAR DEM 2.5M (.tif)", type="primary"):
             if vector_gdf is not None and not vector_gdf.empty:
                 progress_bar.progress(30)
                 
-                # Garantizar CRS de origen y transformar a WGS84 para consulta satelital
                 if vector_gdf.crs is None:
                     vector_gdf.set_crs("EPSG:4326", inplace=True)
                 
@@ -100,7 +101,6 @@ if st.button("🚀 PROCESAR Y DESCARGAR DEM 2.5M (.tif)", type="primary"):
                 bounds = vector_wgs84.total_bounds
                 west, south, east, north = bounds
                 
-                # Calcular zona UTM automática basada en el centroide del polígono
                 center_lon = (west + east) / 2.0
                 center_lat = (south + north) / 2.0
                 utm_zone = int((center_lon + 180) / 6) + 1
@@ -132,11 +132,9 @@ if st.button("🚀 PROCESAR Y DESCARGAR DEM 2.5M (.tif)", type="primary"):
                 dem_url = items[0].assets["data"].href
                 output_file = os.path.join(temp_dir, "DEM_Real_2.5m_Syntro.tif")
                 
-                # Proyectar perimetral a UTM
                 vector_utm = vector_gdf.to_crs(f"EPSG:{epsg_utm}")
                 minx, miny, maxx, maxy = vector_utm.total_bounds
                 
-                # Expandir ligeramente el bounding box (100 metros)
                 buffer_m = 100.0
                 b_minx, b_miny, b_maxx, b_maxy = minx - buffer_m, miny - buffer_m, maxx + buffer_m, maxy + buffer_m
                 
@@ -164,7 +162,6 @@ if st.button("🚀 PROCESAR Y DESCARGAR DEM 2.5M (.tif)", type="primary"):
                 
                 reprojected_data[reprojected_data < -500.0] = -9999.0
                 
-                # Guardar temporalmente el DEM reproyectado
                 temp_dem_path = os.path.join(temp_dir, "temp_reprojected.tif")
                 
                 with rasterio.open(
@@ -188,25 +185,62 @@ if st.button("🚀 PROCESAR Y DESCARGAR DEM 2.5M (.tif)", type="primary"):
                 geom_utm = [shapely.geometry.mapping(g) for g in vector_utm.geometry]
                 
                 with rasterio.open(temp_dem_path) as src:
+                    # Recorte con crop=True (extensión ajustada al polígono)
                     out_image, out_transform = mask(
                         src, 
                         geom_utm, 
                         crop=True, 
-                        all_touched=True,
+                        all_touched=False,   # <- SOLO píxeles cuyo centro esté dentro
                         filled=True,
                         nodata=-9999.0
                     )
                     
-                    # Aislar únicamente los píxeles válidos dentro de la perimetral
-                    valid_pixels = out_image[out_image > -500.0]
-                    if valid_pixels.size > 0:
-                        min_elev = float(np.min(valid_pixels))
-                        max_elev = float(np.max(valid_pixels))
-                        registrar_log(f"Rango altitudinal interno detectado -> Mín: {min_elev:.2f} m | Máx: {max_elev:.2f} m")
+                    # === NUEVO: máscara booleana estricta del interior del polígono ===
+                    # Crea una máscara True = dentro del polígono, False = fuera
+                    interior_mask = geometry_mask(
+                        geometries=geom_utm,
+                        out_shape=(out_image.shape[1], out_image.shape[2]),
+                        transform=out_transform,
+                        invert=True,        # True = dentro del polígono
+                        all_touched=False
+                    )
                     
-                    # Convertir cualquier residuo fuera del polígono a NoData estricto (-9999)
-                    out_image[out_image <= -500.0] = -9999.0
+                    # Forzar a nodata todo lo que esté FUERA del polígono
+                    out_image[0][~interior_mask] = -9999.0
                     
+                    # === NUEVO: valores válidos solo dentro del perímetro ===
+                    valid_pixels = out_image[0][interior_mask & (out_image[0] > -500.0)]
+                    
+                    if valid_pixels.size == 0:
+                        raise Exception("No hay píxeles válidos dentro del perímetro después del recorte.")
+                    
+                    min_elev = float(np.min(valid_pixels))
+                    max_elev = float(np.max(valid_pixels))
+                    mean_elev = float(np.mean(valid_pixels))
+                    std_elev = float(np.std(valid_pixels))
+                    
+                    registrar_log(f"📊 Estadísticas dentro del perímetro:")
+                    registrar_log(f"   • Mínimo : {min_elev:.2f} m")
+                    registrar_log(f"   • Máximo : {max_elev:.2f} m")
+                    registrar_log(f"   • Media  : {mean_elev:.2f} m")
+                    registrar_log(f"   • Desv.  : {std_elev:.2f} m")
+                    registrar_log(f"   • Píxeles válidos: {valid_pixels.size:,}")
+                    
+                    # === NUEVO: normalización opcional entre 0 y 1 ===
+                    if normalizar:
+                        if max_elev > min_elev:
+                            rango = max_elev - min_elev
+                            out_image[0][interior_mask] = (out_image[0][interior_mask] - min_elev) / rango
+                            registrar_log(f"🔁 DEM normalizado entre 0 y 1 (rango real = {rango:.2f} m).")
+                            # Actualizar min/max para metadatos
+                            min_out, max_out = 0.0, 1.0
+                        else:
+                            registrar_log("⚠️ Rango de elevación nulo, no se normaliza.")
+                            min_out, max_out = min_elev, max_elev
+                    else:
+                        min_out, max_out = min_elev, max_elev
+                    
+                    # Guardar GeoTIFF final con metadatos extendidos
                     with rasterio.open(
                         output_file, 
                         "w", 
@@ -221,13 +255,37 @@ if st.button("🚀 PROCESAR Y DESCARGAR DEM 2.5M (.tif)", type="primary"):
                         compress="lzw"
                     ) as dst_out:
                         dst_out.write(out_image)
+                        # Tags informativos visibles en QGIS
+                        dst_out.update_tags(
+                            AREA_MIN=f"{min_out:.3f}",
+                            AREA_MAX=f"{max_out:.3f}",
+                            AREA_MEAN=f"{mean_elev:.3f}",
+                            AREA_STD=f"{std_elev:.3f}",
+                            NORMALIZED=str(normalizar),
+                            SOURCE="Copernicus DEM GLO-30 remuestreado a 2.5m",
+                            CRS=f"EPSG:{epsg_utm}",
+                            UNITS="meters" if not normalizar else "normalized_0_1"
+                        )
+                        
+                        # Estadísticas internas del raster
+                        dst_out.update_tags(
+                            STATISTICS_MINIMUM=str(min_out),
+                            STATISTICS_MAXIMUM=str(max_out)
+                        )
 
                 elapsed_time = round(time.time() - start_time, 2)
                 progress_bar.progress(100)
                 status_label.text(f"⏱ ¡Proceso completado en {elapsed_time} segundos!")
-                registrar_log(f"DEM de elevación exportado correctamente y optimizado para QGIS (EPSG:{epsg_utm}).")
+                registrar_log(f"DEM exportado correctamente (EPSG:{epsg_utm}).")
+                registrar_log(f"Rango final del raster: [{min_out:.2f} , {max_out:.2f}] m")
                 
                 st.success("¡El DEM de elevación real a 2.5m está listo para descargar!")
+                
+                # Resumen visual en pantalla
+                col1, col2, col3 = st.columns(3)
+                col1.metric("Elevación mínima", f"{min_elev:.2f} m")
+                col2.metric("Elevación máxima", f"{max_elev:.2f} m")
+                col3.metric("Rango total", f"{max_elev - min_elev:.2f} m")
                 
                 with open(output_file, "rb") as f:
                     st.download_button(
