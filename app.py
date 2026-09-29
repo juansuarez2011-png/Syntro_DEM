@@ -126,7 +126,7 @@ if st.button("🚀 PROCESAR Y DESCARGAR DEM 2.5M (.tif)", type="primary"):
                 if not items:
                     raise Exception("No se encontraron teselas DEM para la extensión geográfica especificada.")
                 
-                registrar_log("Tesela encontrada. Reproyectando y reescalando a celdas de 2.5 metros...")
+                registrar_log("Tesela encontrada. Leyendo banda de elevación principal...")
                 progress_bar.progress(70)
                 
                 dem_url = items[0].assets["data"].href
@@ -148,19 +148,30 @@ if st.button("🚀 PROCESAR Y DESCARGAR DEM 2.5M (.tif)", type="primary"):
                 reprojected_data = np.zeros((1, height, width), dtype=np.float32)
                 
                 with rasterio.open(dem_url) as src:
+                    # Validar si el raster tiene múltiples bandas y ubicar la de elevación real
+                    band_idx = 1
+                    for b in range(1, src.count + 1):
+                        tags = src.tags(b)
+                        # Comprobar metadatos para asegurar que sea la banda de elevación
+                        if "elev" in str(tags).lower() or src.count == 1:
+                            band_idx = b
+                            break
+                    
+                    registrar_log(f"Extrayendo datos de la banda física #{band_idx} del raster original...")
+                    
                     rasterio.warp.reproject(
-                        source=rasterio.band(src, 1),
+                        source=rasterio.band(src, band_idx),
                         destination=reprojected_data[0],
                         src_transform=src.transform,
                         src_crs=src.crs,
                         dst_transform=transform_25m,
                         dst_crs=f"EPSG:{epsg_utm}",
                         resampling=Resampling.bilinear,
-                        src_nodata=-9999.0,
+                        src_nodata=src.nodata if src.nodata is not None else -9999.0,
                         dst_nodata=-9999.0
                     )
                 
-                # Guardar temporalmente el DEM reproyectado especificando explícitamente el band count (count=1)
+                # Guardar temporalmente el DEM reproyectado
                 temp_dem_path = os.path.join(temp_dir, "temp_reprojected.tif")
                 
                 with rasterio.open(
@@ -211,15 +222,15 @@ if st.button("🚀 PROCESAR Y DESCARGAR DEM 2.5M (.tif)", type="primary"):
                 elapsed_time = round(time.time() - start_time, 2)
                 progress_bar.progress(100)
                 status_label.text(f"⏱ ¡Proceso completado en {elapsed_time} segundos!")
-                registrar_log(f"DEM exportado exitosamente en formato .tif (EPSG:{epsg_utm}).")
+                registrar_log(f"DEM de elevación exportado correctamente (EPSG:{epsg_utm}).")
                 
-                st.success("¡El DEM de elevación a 2.5m está listo para descargar!")
+                st.success("¡El DEM de elevación real a 2.5m está listo para descargar!")
                 
                 with open(output_file, "rb") as f:
                     st.download_button(
                         "📥 Descargar DEM 2.5m (.tif)", 
                         f, 
-                        file_name="DEM_Perimetral_2.5m_Syntro.tif", 
+                        file_name="DEM_Real_2.5m_Syntro.tif", 
                         mime="image/tiff"
                     )
             else:
