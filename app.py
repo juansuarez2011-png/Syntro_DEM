@@ -38,7 +38,7 @@ with col_title:
     st.title("SYNTRO - DESCARGADOR DEM 2.5M")
     st.markdown("### Extracción Automática por Archivo Perimetral")
 
-st.info("Sube el perímetro de tu área de estudio (GeoJSON, KML, KMZ ou Shapefile en .zip) para procesar de forma segura y descargar el DEM en formato .tif.")
+st.info("Sube el perímetro exacto de tu área de estudio (GeoJSON, KML, KMZ o Shapefile en .zip) para procesar y descargar el DEM recortado.")
 
 uploaded_vector = st.file_uploader(
     "Perímetro del Área de Estudio (GeoJSON, KML, KMZ, SHP en .zip)",
@@ -61,8 +61,8 @@ if st.button("🚀 PROCESAR Y DESCARGAR DEM 2.5M (.tif)", type="primary"):
         start_time = time.time()
 
         progress_bar.progress(10)
-        status_label.text("⏱ Leyendo límites del área de estudio...")
-        registrar_log("Cargando archivo vectorial...")
+        status_label.text("⏱ Leyendo límites geográficos...")
+        registrar_log("Cargando archivo vectorial y validando CRS...")
 
         try:
             temp_dir = tempfile.mkdtemp()
@@ -70,7 +70,7 @@ if st.button("🚀 PROCESAR Y DESCARGAR DEM 2.5M (.tif)", type="primary"):
             with open(vector_path, "wb") as f:
                 f.write(uploaded_vector.getbuffer())
 
-            # ============ LECTURA VECTORIAL ============
+            # ============ LECTURA VECTORIAL ROBUSTA ============
             vector_gdf = None
             ext = uploaded_vector.name.split('.')[-1].lower()
 
@@ -119,23 +119,30 @@ if st.button("🚀 PROCESAR Y DESCARGAR DEM 2.5M (.tif)", type="primary"):
 
             vector_gdf = vector_gdf[vector_gdf.geometry.notnull()].copy()
 
+            # Asegurar asignación inicial WGS84 si carece de CRS
             if vector_gdf.crs is None:
                 vector_gdf.set_crs("EPSG:4326", inplace=True)
+            else:
+                vector_gdf = vector_gdf.to_crs("EPSG:4326")
 
-            registrar_log(f"✅ Vector cargado: {len(vector_gdf)} feature(s)")
-
+            registrar_log(f"✅ Perímetro cargado correctamente: {len(vector_gdf)} feature(s)")
             progress_bar.progress(30)
 
-            vector_wgs84 = vector_gdf.to_crs("EPSG:4326")
-            west, south, east, north = vector_wgs84.total_bounds
+            # Obtener límites exactos en WGS84 para la consulta STAC
+            west, south, east, north = vector_gdf.total_bounds
+            registrar_log(f"Extensión WGS84 -> Oeste: {west:.5f}, Sur: {south:.5f}, Este: {east:.5f}, Norte: {north:.5f}")
 
+            # Calcular Zona UTM automática basada en el centroide
             center_lon = (west + east) / 2.0
             center_lat = (south + north) / 2.0
             utm_zone = int((center_lon + 180) / 6) + 1
             hemisphere = "north" if center_lat >= 0 else "south"
             epsg_utm = 32600 + utm_zone if hemisphere == "north" else 32700 + utm_zone
 
-            registrar_log(f"Zona UTM: EPSG:{epsg_utm} (Zona {utm_zone} {hemisphere.upper()})")
+            registrar_log(f"Zona UTM asignada: EPSG:{epsg_utm} (Zona {utm_zone} {hemisphere.upper()})")
+
+            # Reproyectar el vector a UTM para operaciones métricas precisas
+            vector_utm = vector_gdf.to_crs(f"EPSG:{epsg_utm}")
 
             progress_bar.progress(50)
             registrar_log("Conectando con Microsoft Planetary Computer (Copernicus DEM)...")
@@ -148,25 +155,22 @@ if st.button("🚀 PROCESAR Y DESCARGAR DEM 2.5M (.tif)", type="primary"):
             search = catalog.search(
                 collections=["cop-dem-glo-30"],
                 bbox=[west, south, east, north],
-                limit=100
+                limit=50
             )
 
             items = list(search.item_collection())
             if not items:
-                raise Exception("No se encontraron teselas DEM para la extensión.")
+                raise Exception("No se encontraron teselas DEM para las coordenadas indicadas.")
 
-            registrar_log(f"📦 Teselas encontradas: {len(items)}")
+            registrar_log(f"📦 Teselas satelitales obtenidas: {len(items)}")
             for it in items:
                 registrar_log(f"   • {it.id}")
 
             progress_bar.progress(70)
-
             output_file = os.path.join(temp_dir, "DEM_Real_2.5m_Syntro.tif")
 
-            vector_utm = vector_gdf.to_crs(f"EPSG:{epsg_utm}")
             minx, miny, maxx, maxy = vector_utm.total_bounds
-
-            buffer_m = 100.0
+            buffer_m = 150.0  # Buffer de seguridad para evitar bordes vacíos
             b_minx, b_miny = minx - buffer_m, miny - buffer_m
             b_maxx, b_maxy = maxx + buffer_m, maxy + buffer_m
 
@@ -175,16 +179,13 @@ if st.button("🚀 PROCESAR Y DESCARGAR DEM 2.5M (.tif)", type="primary"):
             height = int(round((b_maxy - b_miny) / res))
             transform_25m = from_bounds(b_minx, b_miny, b_maxx, b_maxy, width, height)
 
-            # ============ FUSIÓN MULTI-TESELA ============
             reprojected_data = np.full((1, height, width), -9999.0, dtype=np.float32)
 
-            registrar_log(f"🌐 Fusionando {len(items)} tesela(s)...")
+            registrar_log(f"🌐 Muestreando teselas a resolución de 2.5m...")
 
             for idx, item in enumerate(items):
                 try:
                     dem_url = item.assets["data"].href
-                    registrar_log(f"   ↳ Tesela {idx+1}/{len(items)}: {item.id}")
-
                     with rasterio.open(dem_url) as src:
                         src_nodata = src.nodata if src.nodata is not None else -9999.0
                         tile_data = np.full((height, width), -9999.0, dtype=np.float32)
@@ -203,33 +204,25 @@ if st.button("🚀 PROCESAR Y DESCARGAR DEM 2.5M (.tif)", type="primary"):
 
                         valid_tile = (tile_data > -500.0) & (tile_data < 9000.0)
                         reprojected_data[0][valid_tile] = tile_data[valid_tile]
-
                 except Exception as e_tile:
-                    registrar_log(f"   ⚠️ Error tesela {item.id}: {e_tile}")
+                    registrar_log(f"⚠️ Aviso en tesela {item.id}: {e_tile}")
                     continue
 
-            mask_invalid = (reprojected_data[0] < -500.0) | (reprojected_data[0] > 9000.0)
-            reprojected_data[0][mask_invalid] = np.float32(-9999.0)
-
             temp_dem_path = os.path.join(temp_dir, "temp_reprojected.tif")
-
             with rasterio.open(
                 temp_dem_path, "w", driver="GTiff",
                 height=height, width=width, count=1,
                 dtype="float32", crs=f"EPSG:{epsg_utm}",
                 transform=transform_25m, nodata=-9999.0,
-                compress="lzw", tiled=True,
-                blockxsize=256, blockysize=256
+                compress="lzw", tiled=True
             ) as dst:
                 dst.write(reprojected_data)
 
-            registrar_log("✅ Fusión completada.")
             progress_bar.progress(85)
-            registrar_log("Aplicando recorte vectorial...")
+            registrar_log("Aplicando recorte estricto por geometría perimetral...")
 
             geom_utm = [shapely.geometry.mapping(g) for g in vector_utm.geometry]
 
-            # ============ RECORTE CORRECTO ============
             with rasterio.open(temp_dem_path) as src:
                 out_image, out_transform = mask(
                     src, geom_utm, crop=True,
@@ -238,32 +231,27 @@ if st.button("🚀 PROCESAR Y DESCARGAR DEM 2.5M (.tif)", type="primary"):
                     nodata=-9999.0
                 )
 
-                # Limpieza de valores anómalos fuera del rango físico del terreno
+                # Filtrar valores fuera de rango físico lógico
                 mask_bad = (out_image[0] < -500.0) | (out_image[0] > 9000.0)
                 out_image[0][mask_bad] = np.float32(-9999.0)
 
                 valid_pixels = out_image[0][
-                    (out_image[0] > -500.0)
-                    & (out_image[0] < 9000.0)
+                    (out_image[0] > -500.0) & (out_image[0] < 9000.0)
                 ]
 
                 if valid_pixels.size == 0:
-                    raise Exception("No hay píxeles válidos dentro del perímetro.")
+                    raise Exception("No se encontraron píxeles de elevación válidos dentro del polígono. Verifica que el polígono esté sobre tierra firme.")
 
                 min_elev = float(np.min(valid_pixels))
                 max_elev = float(np.max(valid_pixels))
                 mean_elev = float(np.mean(valid_pixels))
-                std_elev = float(np.std(valid_pixels))
 
-                registrar_log("📊 Estadísticas dentro del perímetro:")
+                registrar_log("📊 Estadísticas reales capturadas:")
                 registrar_log(f"   • Mínimo : {min_elev:.2f} m")
                 registrar_log(f"   • Máximo : {max_elev:.2f} m")
-                registrar_log(f"   • Media  : {mean_elev:.2f} m")
+                registrar_log(f"   • Promedio: {mean_elev:.2f} m")
                 registrar_log(f"   • Píxeles válidos: {valid_pixels.size:,}")
 
-                min_out, max_out = min_elev, max_elev
-
-                # ============ GUARDADO FINAL ============
                 with rasterio.open(
                     output_file, "w", driver="GTiff",
                     height=out_image.shape[1],
@@ -273,40 +261,17 @@ if st.button("🚀 PROCESAR Y DESCARGAR DEM 2.5M (.tif)", type="primary"):
                     transform=out_transform,
                     nodata=-9999.0,
                     compress="lzw",
-                    tiled=True,
-                    blockxsize=256, blockysize=256,
-                    BIGTIFF="IF_SAFER"
+                    tiled=True
                 ) as dst_out:
                     dst_out.write(out_image)
                     dst_out.set_band_description(1, "Elevacion_m")
 
-            # ============ POST-PROCESO GDAL ============
-            try:
-                from osgeo import gdal
-                gdal.UseExceptions()
-
-                ds = gdal.Open(output_file, gdal.GA_Update)
-                if ds is not None:
-                    band = ds.GetRasterBand(1)
-                    band.SetNoDataValue(-9999.0)
-                    band.ComputeStatistics(False)
-                    ds.FlushCache()
-                    ds = None
-
-                registrar_log("✅ Nodata y estadísticas calculadas con GDAL.")
-            except Exception as e_post:
-                registrar_log(f"⚠️ Post-proceso GDAL: {e_post}")
-
-            # ============ GENERAR .QML ============
+            # Generar archivo de estilo QML automático con el rango real capturado
             qml_path = output_file.replace(".tif", ".qml")
-            try:
-                qml_min = min_out if min_out != max_out else (min_out - 1.0)
-                qml_max = max_out if min_out != max_out else (max_out + 1.0)
-
-                qml_content = f"""<!DOCTYPE qgis PUBLIC 'http://mrcc.com/qgis.dtd' 'SYSTEM'>
-<qgis version="3.34.0-Prizren" styleCategories="AllStyleCategories">
+            qml_content = f"""<!DOCTYPE qgis PUBLIC 'http://mrcc.com/qgis.dtd' 'SYSTEM'>
+<qgis version="3.34.0" styleCategories="AllStyleCategories">
   <pipe>
-    <rasterrenderer type="singlebandgray" opacity="1" alphaBand="-1" grayBand="1">
+    <rasterrenderer type="singlebandpseudocolor" opacity="1" alphaBand="-1" band="1">
       <rasterTransparency>
         <singleValuePixelList>
           <pixelListEntry min="-9999" max="-9999" percentTransparent="100"/>
@@ -315,68 +280,50 @@ if st.button("🚀 PROCESAR Y DESCARGAR DEM 2.5M (.tif)", type="primary"):
       <minMaxOrigin>
         <limits>MinMax</limits>
         <extent>WholeRaster</extent>
-        <statAccuracy>Estimated</statAccuracy>
-        <cumulativeCutLower>0.02</cumulativeCutLower>
-        <cumulativeCutUpper>0.98</cumulativeCutUpper>
+        <statAccuracy>Exact</statAccuracy>
       </minMaxOrigin>
-      <contrastEnhancement>
-        <minValue>{qml_min}</minValue>
-        <maxValue>{qml_max}</maxValue>
-        <algorithm>StretchToMinimumMaximum</algorithm>
-      </contrastEnhancement>
+      <rastershader>
+        <colorrampshader classificationMode="2" colorrampType="INTERPOLATED" clip="0">
+          <item value="{min_elev}" label="{min_elev:.2f} m" color="#2b83ba" alpha="255"/>
+          <item value="{(min_elev + max_elev) / 2}" label="{(min_elev + max_elev) / 2:.2f} m" color="#ffffbf" alpha="255"/>
+          <item value="{max_elev}" label="{max_elev:.2f} m" color="#d7191c" alpha="255"/>
+        </colorrampshader>
+      </rastershader>
     </rasterrenderer>
-    <brightnesscontrast gamma="1" brightness="0" contrast="0"/>
-    <huesaturation grayscaleMode="0"/>
-    <rasterresampler maxOversampling="2"/>
   </pipe>
 </qgis>
 """
-                with open(qml_path, "w", encoding="utf-8") as f_qml:
-                    f_qml.write(qml_content)
-                registrar_log(f"🎨 Estilo .qml generado ({qml_min:.2f} a {qml_max:.2f} m).")
+            with open(qml_path, "w", encoding="utf-8") as f_qml:
+                f_qml.write(qml_content)
 
-            except Exception as e_qml:
-                registrar_log(f"⚠️ .qml: {e_qml}")
-
-            # ============ DESCARGA ÚNICA EN ZIP ============
             zip_output = os.path.join(temp_dir, "DEM_Real_2.5m_Syntro.zip")
             with zipfile.ZipFile(zip_output, "w", zipfile.ZIP_DEFLATED) as zf:
                 zf.write(output_file, arcname="DEM_Real_2.5m_Syntro.tif")
-                if os.path.exists(qml_path):
-                    zf.write(qml_path, arcname="DEM_Real_2.5m_Syntro.qml")
+                zf.write(qml_path, arcname="DEM_Real_2.5m_Syntro.qml")
 
-            # ============ FIN ============
             elapsed_time = round(time.time() - start_time, 2)
             progress_bar.progress(100)
             status_label.text(f"⏱ ¡Completado en {elapsed_time}s!")
-            registrar_log(f"DEM exportado (EPSG:{epsg_utm}).")
-            registrar_log(f"Rango: [{min_out:.2f} , {max_out:.2f}] m")
-
-            st.success("¡DEM listo para descargar!")
+            st.success("¡DEM procesado con éxito!")
 
             col1, col2, col3 = st.columns(3)
-            col1.metric("Elev. mínima", f"{min_elev:.2f} m")
-            col2.metric("Elev. máxima", f"{max_elev:.2f} m")
+            col1.metric("Elev. Mínima", f"{min_elev:.2f} m")
+            col2.metric("Elev. Máxima", f"{max_elev:.2f} m")
             col3.metric("Rango", f"{max_elev - min_elev:.2f} m")
 
             with open(zip_output, "rb") as f_zip:
                 st.download_button(
-                    "📦 Descargar DEM + Estilo (.zip)",
+                    "📦 Descargar DEM + Estilo de Color (.zip)",
                     f_zip,
                     file_name="DEM_Real_2.5m_Syntro.zip",
                     mime="application/zip",
                     use_container_width=True
                 )
 
-            st.warning(
-                "⚠️ **IMPORTANTE para GeoLibre / QGIS:** El ZIP contiene el `.tif` y el `.qml`. "
-                "**Descomprime el ZIP en una carpeta** y cárgalo nuevamente en tu visor."
-            )
-
         except Exception as e:
             error_completo = traceback.format_exc()
-            registrar_log(f"❌ Error: {type(e).__name__} → {str(e)}")
-            st.error(f"Error: {str(e)}")
+            registrar_log(f"❌ Error: {str(e)}")
+            st.error(f"Error crítico: {str(e)}")
             with st.expander("🔧 Detalle técnico"):
                 st.code(error_completo, language="python")
     else:
