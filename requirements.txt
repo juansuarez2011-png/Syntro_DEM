@@ -1,9 +1,7 @@
 streamlit
-numpy
 geopandas
 rasterio
 shapely
 pystac-client
 planetary-computer
-fiona
-pyogrio
+GDAL
