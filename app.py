@@ -4,14 +4,13 @@ import time
 import traceback
 import tempfile
 import zipfile
-import numpy as np
+import json
+import geopandas as gpd
 import requests
 import pystac_client
 import planetary_computer
-from shapely.geometry import box, shape
-import json
 
-st.set_page_config(page_title="Syntro Academy - Descargador DEM", page_icon="🛰️", layout="centered")
+st.set_page_config(page_title="Syntro Academy - Descargador DEM Multiformato", page_icon="🛰️", layout="centered")
 
 st.markdown("""
     <style>
@@ -32,14 +31,14 @@ with col_logo:
             unsafe_allow_html=True
         )
 with col_title:
-    st.title("SYNTRO - DESCARGADOR DEM")
-    st.markdown("### Extracción Directa Ligera en la Nube")
+    st.title("SYNTRO - DESCARGADOR DEM MULTIFORMATO")
+    st.markdown("### Soporte para KML, KMZ, SHP (.zip) y GeoJSON")
 
-st.info("Sube tu archivo de límites (GeoJSON o JSON) para descargar el modelo de elevación digital optimizado.")
+st.info("Sube tu archivo de límites en formato KML, KMZ, Shapefile (.zip) o GeoJSON.")
 
-uploaded_vector = st.file_uploader(
-    "Perímetro del Área de Estudio (.geojson o .json)",
-    type=["geojson", "json"]
+uploaded_file = st.file_uploader(
+    "Área de Estudio",
+    type=["geojson", "json", "kml", "kmz", "zip"]
 )
 
 log_container = st.empty()
@@ -53,42 +52,77 @@ def registrar_log(mensaje):
     log_container.text_area("Registro de Actividad (Log):", "\n".join(logs_history), height=180)
 
 if st.button("🚀 PROCESAR Y DESCARGAR DEM (.tif)", type="primary"):
-    if uploaded_vector:
+    if uploaded_file:
         logs_history.clear()
         start_time = time.time()
 
         progress_bar.progress(15)
-        status_label.text("⏱ Leyendo límites geográficos...")
-        registrar_log("Analizando geometría del archivo subido...")
+        status_label.text("⏱ Leyendo y normalizando geometría espacial...")
+        registrar_log(f"Archivo recibido: {uploaded_file.name}")
 
+        temp_dir = tempfile.mkdtemp()
+        
         try:
-            geo_data = json.load(uploaded_vector)
+            file_extension = uploaded_file.name.split('.')[-1].lower()
+            input_path = os.path.join(temp_dir, uploaded_file.name)
             
-            # Extraer coordenadas y calcular bounding box simple
-            coords = []
-            if "features" in geo_data:
-                for feat in geo_data["features"]:
-                    geom = feat.get("geometry", {})
-                    if geom.get("type") == "Polygon":
-                        coords.extend(geom.get("coordinates")[0])
-                    elif geom.get("type") == "MultiPolygon":
-                        for poly in geom.get("coordinates"):
-                            coords.extend(poly[0])
-            elif "geometry" in geo_data:
-                geom = geo_data.get("geometry", {})
-                if geom.get("type") == "Polygon":
-                    coords.extend(geom.get("coordinates")[0])
+            with open(input_path, "wb") as f:
+                f.write(uploaded_file.getbuffer())
 
-            if not coords:
-                # Intentar leer bounds genéricos si es un GeoJSON estándar
-                raise Exception("No se pudieron extraer las coordenadas del polígono. Asegúrate de que sea un GeoJSON válido.")
+            # Manejo de Shapefile comprimido en ZIP
+            if file_extension == 'zip':
+                registrar_log("Descomprimiendo Shapefile (.zip)...")
+                with zipfile.ZipFile(input_path, 'r') as zip_ref:
+                    zip_ref.extractall(temp_dir)
+                
+                # Buscar el archivo .shp dentro de la carpeta descomprimida
+                shp_file = None
+                for root, dirs, files in os.walk(temp_dir):
+                    for file in files:
+                        if file.endswith('.shp'):
+                            shp_file = os.path.join(root, file)
+                            break
+                if not shp_file:
+                    raise Exception("No se encontró ningún archivo .shp dentro del archivo .zip.")
+                
+                gdf = gpd.read_file(shp_file)
 
-            lons = [c[0] for c in coords]
-            lats = [c[1] for c in coords]
-            west, south, east, north = min(lons), min(lats), max(lons), max(lats)
+            # Manejo de KML o KMZ
+            elif file_extension in ['kml', 'kmz']:
+                registrar_log(f"Procesando archivo {file_extension.upper()}...")
+                # Habilitar driver KML en Fiona/Geopandas
+                gpd.io.file.fiona.drvsupport.supported_drivers['KML'] = 'rw'
+                gpd.io.file.fiona.drvsupport.supported_drivers['LIBKML'] = 'rw'
+                
+                if file_extension == 'kmz':
+                    # Extraer el kml dentro del kmz
+                    with zipfile.ZipFile(input_path, 'r') as kmz_ref:
+                        kml_filename = [name for name in kmz_ref.namelist() if name.endswith('.kml')][0]
+                        kmz_ref.extract(kml_filename, temp_dir)
+                        kml_path = os.path.join(temp_dir, kml_filename)
+                    gdf = gpd.read_file(kml_path, driver='KML')
+                else:
+                    gdf = gpd.read_file(input_path, driver='KML')
+
+            # Manejo de GeoJSON o JSON
+            elif file_extension in ['geojson', 'json']:
+                registrar_log("Procesando formato GeoJSON...")
+                gdf = gpd.read_file(input_path)
+
+            else:
+                raise Exception("Formato de archivo no soportado.")
+
+            # Asegurar que esté en coordenadas geográficas WGS84 (EPSG:4326)
+            if gdf.crs is not None and gdf.crs != "EPSG:4326":
+                registrar_log(f"Reproyectando desde {gdf.crs} a WGS84 (EPSG:4326)...")
+                gdf = gdf.to_crs("EPSG:4326")
+
+            # Obtener el Bounding Box global de todas las geometrías
+            total_bounds = gdf.total_bounds  # [minx, miny, maxx, maxy]
+            west, south, east, north = total_bounds[0], total_bounds[1], total_bounds[2], total_bounds[3]
 
             registrar_log(f"Extensión detectada -> Oeste: {west:.5f}, Sur: {south:.5f}, Este: {east:.5f}, Norte: {north:.5f}")
-            progress_bar.progress(40)
+            progress_bar.progress(45)
 
             registrar_log("Conectando con Microsoft Planetary Computer (Copernicus DEM 30m)...")
             catalog = pystac_client.Client.open(
@@ -104,12 +138,12 @@ if st.button("🚀 PROCESAR Y DESCARGAR DEM (.tif)", type="primary"):
 
             items = list(search.item_collection())
             if not items:
-                raise Exception("No se encontraron teselas DEM para las coordenadas indicadas.")
+                raise Exception("No se encontraron teselas DEM para las coordenadas del área seleccionada.")
 
             registrar_log(f"📦 Tesela satelital localizada: {items[0].id}")
             progress_bar.progress(70)
 
-            # Descargar archivo DEM directamente desde la URL firmada de la nube
+            # Descargar archivo DEM directamente desde la URL firmada
             url = items[0].assets["data"].href
             registrar_log("Descargando segmento de elevación...")
             
@@ -117,14 +151,12 @@ if st.button("🚀 PROCESAR Y DESCARGAR DEM (.tif)", type="primary"):
             if response.status_code != 200:
                 raise Exception(f"Error al descargar la tesela DEM (Código HTTP: {response.status_code})")
 
-            temp_dir = tempfile.mkdtemp()
             output_file = os.path.join(temp_dir, "DEM_Syntro_Cloud.tif")
-            
             with open(output_file, "wb") as f:
                 f.write(response.content)
 
             progress_bar.progress(90)
-            registrar_log("Generando metadatos y archivo comprimido final...")
+            registrar_log("Generando paquete comprimido final...")
 
             zip_output = os.path.join(temp_dir, "DEM_Syntro_Cloud.zip")
             with zipfile.ZipFile(zip_output, "w", zipfile.ZIP_DEFLATED) as zf:
@@ -133,7 +165,7 @@ if st.button("🚀 PROCESAR Y DESCARGAR DEM (.tif)", type="primary"):
             elapsed_time = round(time.time() - start_time, 2)
             progress_bar.progress(100)
             status_label.text(f"⏱ ¡Completado en {elapsed_time}s!")
-            st.success("¡DEM descargado y preparado con éxito!")
+            st.success("¡DEM procesado y descargado con éxito!")
 
             with open(zip_output, "rb") as f_zip:
                 st.download_button(
@@ -151,4 +183,4 @@ if st.button("🚀 PROCESAR Y DESCARGAR DEM (.tif)", type="primary"):
             with st.expander("🔧 Detalle técnico"):
                 st.code(error_completo, language="python")
     else:
-        st.warning("Sube un archivo GeoJSON antes de procesar.")
+        st.warning("Sube un archivo espacial antes de procesar.")
