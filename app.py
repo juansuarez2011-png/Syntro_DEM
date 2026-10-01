@@ -14,11 +14,11 @@ import numpy as np
 import requests
 import pystac_client
 import planetary_computer
-from pyproj import Transformer
+from pyproj import Transformer, CRS
 
 st.set_page_config(
     page_title="Syntro Academy - Descargador DEM 2.5m (Píxel Fino)", 
-    page_icon="🛰️", 
+    page_icon="🛰️️", 
     layout="wide"
 )
 
@@ -117,6 +117,7 @@ if st.button("🚀 INICIAR PROCESO DEM 2.5M", type="primary"):
                 f.write(uploaded_file.getbuffer())
 
             todas_coordenadas = []
+            shapefile_crs = "EPSG:4326"
 
             # 1. GeoJSON / JSON
             if file_extension in ['geojson', 'json']:
@@ -138,19 +139,46 @@ if st.button("🚀 INICIAR PROCESO DEM 2.5M", type="primary"):
                     zip_ref.extractall(temp_dir)
                 
                 shp_path = None
+                prj_path = None
                 for root, dirs, files in os.walk(temp_dir):
                     for file in files:
                         if file.endswith('.shp'):
                             shp_path = os.path.join(root, file)
-                            break
+                        elif file.endswith('.prj'):
+                            prj_path = os.path.join(root, file)
+
                 if not shp_path:
                     raise Exception("No se encontró ningún archivo .shp dentro del archivo .zip.")
                 
+                if prj_path and os.path.exists(prj_path):
+                    with open(prj_path, 'r') as prj_file:
+                        prj_text = prj_file.read()
+                        try:
+                            parsed_crs = CRS.from_string(prj_text)
+                            shapefile_crs = parsed_crs
+                            registrar_log(f"CRS detectado en el Shapefile: {parsed_crs.name}")
+                        except Exception:
+                            registrar_log("No se pudo parsear el archivo .prj, asumiendo coordenadas geográficas o UTM estándar.")
+
                 registrar_log("Extrayendo puntos del Shapefile...")
                 sf = shapefile.Reader(shp_path)
+                
+                pts_originales = []
                 for shape_obj in sf.shapes():
-                    pts = [(pt[0], pt[1]) for pt in shape_obj.points]
-                    todas_coordenadas.extend(pts)
+                    for pt in shape_obj.points:
+                        pts_originales.append((pt[0], pt[1]))
+
+                if not pts_originales:
+                    raise Exception("El Shapefile no contiene geometrías válidas.")
+
+                if shapefile_crs != "EPSG:4326":
+                    registrar_log("Reproyectando coordenadas del Shapefile a WGS84 (EPSG:4326)...")
+                    transformer_to_wgs84 = Transformer.from_crs(shapefile_crs, "EPSG:4326", always_xy=True)
+                    for x, y in pts_originales:
+                        lon, lat = transformer_to_wgs84.transform(x, y)
+                        todas_coordenadas.append((lon, lat))
+                else:
+                    todas_coordenadas = pts_originales
 
             # 3. KML / KMZ
             elif file_extension in ['kml', 'kmz']:
@@ -332,7 +360,7 @@ if st.button("🚀 INICIAR PROCESO DEM 2.5M", type="primary"):
             with m1:
                 st.metric(label="⛰️ Altura Mínima", value=f"{elev_min:.2f} m")
             with m2:
-                st.metric(label="🏔️ Altura Máxima", value=f"{elev_max:.2f} m")
+                st.metric(label="🏔️️ Altura Máxima", value=f"{elev_max:.2f} m")
             with m3:
                 st.metric(label="📏 Desnivel", value=f"{elev_range:.2f} m")
 
