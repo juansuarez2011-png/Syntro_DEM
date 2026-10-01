@@ -62,7 +62,7 @@ if st.button("🚀 PROCESAR Y DESCARGAR DEM 2.5M (.tif)", type="primary"):
         start_time = time.time()
 
         progress_bar.progress(10)
-        status_label.text("⏱️ Leyendo límites del área de estudio...")
+        status_label.text("⏱️️ Leyendo límites del área de estudio...")
         registrar_log("Cargando archivo vectorial...")
 
         try:
@@ -197,7 +197,7 @@ if st.button("🚀 PROCESAR Y DESCARGAR DEM 2.5M (.tif)", type="primary"):
                             src_crs=src.crs,
                             dst_transform=transform_25m,
                             dst_crs=f"EPSG:{epsg_utm}",
-                            resampling=Resampling.nearest,
+                            resampling=Resampling.cubic,  # <--- CORREGIDO A CÚBICO PARA SUAVIZAR PÍXELES
                             src_nodata=src_nodata,
                             dst_nodata=-9999.0
                         )
