@@ -9,6 +9,7 @@ import xml.etree.ElementTree as ET
 import shapefile
 import rasterio
 from rasterio.mask import mask
+from rasterio.windows import from_bounds
 import numpy as np
 from shapely.geometry import Polygon, MultiPolygon
 import requests
@@ -22,6 +23,19 @@ st.markdown("""
     .main { background-color: #1e1e24; color: #ffffff; }
     .stApp { background-color: #1e1e24; }
     h1, h2, h3 { color: #3498db !important; }
+    /* Estilo 3D para contenedores y botones */
+    div.stButton > button:first-child {
+        background: linear-gradient(135deg, #3498db, #2980b9);
+        color: white;
+        border: none;
+        border-radius: 8px;
+        box-shadow: 0 4px 6px rgba(0,0,0,0.3), 0 1px 3px rgba(0,0,0,0.2);
+        transition: all 0.2s ease;
+    }
+    div.stButton > button:first-child:hover {
+        transform: translateY(-2px);
+        box-shadow: 0 6px 8px rgba(0,0,0,0.4), 0 3px 5px rgba(0,0,0,0.2);
+    }
     </style>
 """, unsafe_allow_html=True)
 
@@ -32,14 +46,15 @@ with col_logo:
     else:
         st.markdown(
             "<div style='width:90px;height:90px;background:linear-gradient(135deg,#3498db,#2c3e50);"
-            "border-radius:12px;display:flex;align-items:center;justify-content:center;font-size:36px;'>🛰️</div>",
+            "border-radius:12px;display:flex;align-items:center;justify-content:center;font-size:36px;"
+            "box-shadow: 0 8px 16px rgba(0,0,0,0.4);'>🛰️</div>",
             unsafe_allow_html=True
         )
 with col_title:
     st.title("SYNTRO - DEM DINÁMICO GLOBAL")
-    st.markdown("### Recorte Exacto por Poligonal y Estadísticas Reales")
+    st.markdown("### Extensión Rectangular Optimizada y Recorte Poligonal")
 
-st.info("Sube cualquier archivo vectorial del mundo (KML, KMZ, Shapefile .zip o GeoJSON). El sistema leerá la poligonal y calculará la altitud real de forma estricta dentro del área.")
+st.info("Sube tu archivo vectorial (KML, KMZ, Shapefile o GeoJSON). El sistema extraerá el ráster en formato rectangular/cuadrado (bounding box del tramo) para una visualización continua perfecta en QGIS, calculando las estadísticas estrictas dentro de tu poligonal.")
 
 uploaded_file = st.file_uploader(
     "Área de Estudio (Poligonal)",
@@ -77,7 +92,7 @@ def extraer_coordenadas_de_geometria(geom_dict):
             coords.append((pt[0], pt[1]))
     return coords
 
-if st.button("🚀 PROCESAR POLIGONAL Y EXTRAER DEM", type="primary"):
+if st.button("🚀 PROCESAR Y GENERAR RÁSTER RECTANGULAR Y POLIGONAL", type="primary"):
     if uploaded_file:
         logs_history.clear()
         start_time = time.time()
@@ -177,7 +192,7 @@ if st.button("🚀 PROCESAR POLIGONAL Y EXTRAER DEM", type="primary"):
             if not todas_coordenadas:
                 raise Exception("No se pudieron extraer coordenadas válidas del archivo.")
 
-            # Crear geometría unificada o envolvente para el recorte de Rasterio
+            # Crear geometría unificada
             if lista_poligonos_shapely:
                 if len(lista_poligonos_shapely) == 1:
                     geometria_recorte = lista_poligonos_shapely[0]
@@ -190,12 +205,12 @@ if st.button("🚀 PROCESAR POLIGONAL Y EXTRAER DEM", type="primary"):
 
             geometrias_geojson = [geometria_recorte.__geo_interface__]
 
-            # Bounding Box global para buscar la tesela satelital en el mundo
+            # Bounding Box global para la extensión rectangular
             lons = [c[0] for c in todas_coordenadas]
             lats = [c[1] for c in todas_coordenadas]
             west, south, east, north = min(lons), min(lats), max(lons), max(lats)
 
-            registrar_log(f"Bounding Box Global -> O: {west:.4f}, S: {south:.4f}, E: {east:.4f}, N: {north:.4f}")
+            registrar_log(f"Bounding Box Rectangular -> O: {west:.4f}, S: {south:.4f}, E: {east:.4f}, N: {north:.4f}")
             progress_bar.progress(35)
 
             # Conexión STAC Planetary Computer (Global)
@@ -231,13 +246,30 @@ if st.button("🚀 PROCESAR POLIGONAL Y EXTRAER DEM", type="primary"):
                 f.write(response.content)
 
             progress_bar.progress(75)
-            registrar_log("Aplicando máscara geométrica exacta sobre la poligonal...")
+            registrar_log("Generando ráster rectangular continuo y máscara poligonal...")
 
-            # RECORTE EXACTO PIXELES ADENTRO DE LA POLIGONAL CON NODATA EN NAN
+            # 1. RÁSTER RECTANGULAR (Ideal para visualización continua y sin cortes en QGIS)
             with rasterio.open(raw_dem_file) as src:
+                window = from_bounds(west, south, east, north, src.transform)
+                window = window.round_offsets().round_shape()
+                
+                rect_image = src.read(window=window)
+                rect_transform = rasterio.windows.transform(window, src.transform)
+                
+                rect_meta = src.meta.copy()
+                rect_meta.update({
+                    "height": rect_image.shape[1],
+                    "width": rect_image.shape[2],
+                    "transform": rect_transform
+                })
+                
+                rect_dem_path = os.path.join(temp_dir, "DEM_Rectangular_Visualizacion.tif")
+                with rasterio.open(rect_dem_path, "w", **rect_meta) as dest:
+                    dest.write(rect_image)
+
+                # 2. RECORTE ESTRICTO POR POLÍGONO (Para estadísticas exactas)
                 out_image, out_transform = mask(src, geometrias_geojson, crop=True, nodata=np.nan)
                 out_meta = src.meta.copy()
-                
                 out_meta.update({
                     "height": out_image.shape[1],
                     "width": out_image.shape[2],
@@ -245,17 +277,16 @@ if st.button("🚀 PROCESAR POLIGONAL Y EXTRAER DEM", type="primary"):
                     "nodata": np.nan
                 })
                 
-                clipped_dem_path = os.path.join(temp_dir, "DEM_Syntro_Recortado.tif")
+                clipped_dem_path = os.path.join(temp_dir, "DEM_Poligono_Exacto.tif")
                 with rasterio.open(clipped_dem_path, "w", **out_meta) as dest:
                     dest.write(out_image)
 
-                dem_array = out_image[0]
+                dem_array_poly = out_image[0]
 
             progress_bar.progress(90)
-            registrar_log("Calculando estadísticas altitudinales estrictas dentro del área...")
+            registrar_log("Calculando estadísticas altitudinales estrictas dentro de la poligonal...")
 
-            # Filtrar estrictamente solo valores finitos dentro del polígono (excluyendo el fondo NaN)
-            valid_pixels = dem_array[np.isfinite(dem_array)]
+            valid_pixels = dem_array_poly[np.isfinite(dem_array_poly)]
 
             if valid_pixels.size > 0:
                 elev_min = float(np.min(valid_pixels))
@@ -279,16 +310,17 @@ if st.button("🚀 PROCESAR POLIGONAL Y EXTRAER DEM", type="primary"):
                 rep.write(f"Rango Altitudinal (Desnivel): {elev_range:.2f} m\n")
                 rep.write("==================================================\n")
 
-            # Empaquetar en ZIP
-            zip_output = os.path.join(temp_dir, "DEM_Syntro_Global_Resultado.zip")
+            # Empaquetar en ZIP (Ráster rectangular + Ráster poligonal + Reporte)
+            zip_output = os.path.join(temp_dir, "DEM_Syntro_Optimizado.zip")
             with zipfile.ZipFile(zip_output, "w", zipfile.ZIP_DEFLATED) as zf:
-                zf.write(clipped_dem_path, arcname="DEM_Recortado_Area.tif")
+                zf.write(rect_dem_path, arcname="DEM_Rectangular_Visualizacion.tif")
+                zf.write(clipped_dem_path, arcname="DEM_Poligono_Exacto.tif")
                 zf.write(report_path, arcname="reporte_estadisticas_dem.txt")
 
             elapsed_time = round(time.time() - start_time, 2)
             progress_bar.progress(100)
             status_label.text(f"⏱ ¡Proceso completado en {elapsed_time}s!")
-            st.success("¡Modelo DEM recortado y estadísticas calculadas con éxito!")
+            st.success("¡Ráster rectangular y recorte poligonal generado con éxito!")
 
             # Tarjetas de visualización de resultados
             st.markdown("### 📊 Resultados Topográficos de la Poligonal")
@@ -303,9 +335,9 @@ if st.button("🚀 PROCESAR POLIGONAL Y EXTRAER DEM", type="primary"):
             st.write("")
             with open(zip_output, "rb") as f_zip:
                 st.download_button(
-                    "📦 Descargar Paquete (.zip con DEM Recortado y Reporte)",
+                    "📦 Descargar Paquete (.zip con Ráster Rectangular, Poligonal y Reporte)",
                     f_zip,
-                    file_name="DEM_Syntro_Poligonal.zip",
+                    file_name="DEM_Syntro_Optimizado.zip",
                     mime="application/zip",
                     use_container_width=True
                 )
