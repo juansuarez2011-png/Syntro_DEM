@@ -8,7 +8,6 @@ import rasterio
 from rasterio.mask import mask
 from rasterio.enums import Resampling
 from rasterio.transform import from_bounds
-from rasterio.features import geometry_mask
 import tempfile
 import zipfile
 import shapely.geometry
@@ -39,7 +38,7 @@ with col_title:
     st.title("SYNTRO - DESCARGADOR DEM 2.5M")
     st.markdown("### Extracción Automática por Archivo Perimetral")
 
-st.info("Sube el perímetro de tu área de estudio (GeoJSON, KML, KMZ o Shapefile en .zip) para procesar de forma segura y descargar el DEM en formato .tif.")
+st.info("Sube el perímetro de tu área de estudio (GeoJSON, KML, KMZ ou Shapefile en .zip) para procesar de forma segura y descargar el DEM en formato .tif.")
 
 uploaded_vector = st.file_uploader(
     "Perímetro del Área de Estudio (GeoJSON, KML, KMZ, SHP en .zip)",
@@ -62,7 +61,7 @@ if st.button("🚀 PROCESAR Y DESCARGAR DEM 2.5M (.tif)", type="primary"):
         start_time = time.time()
 
         progress_bar.progress(10)
-        status_label.text("⏱️️ Leyendo límites del área de estudio...")
+        status_label.text("⏱ Leyendo límites del área de estudio...")
         registrar_log("Cargando archivo vectorial...")
 
         try:
@@ -197,7 +196,7 @@ if st.button("🚀 PROCESAR Y DESCARGAR DEM 2.5M (.tif)", type="primary"):
                             src_crs=src.crs,
                             dst_transform=transform_25m,
                             dst_crs=f"EPSG:{epsg_utm}",
-                            resampling=Resampling.cubic,  # <--- CORREGIDO A CÚBICO PARA SUAVIZAR PÍXELES
+                            resampling=Resampling.cubic,
                             src_nodata=src_nodata,
                             dst_nodata=-9999.0
                         )
@@ -230,7 +229,7 @@ if st.button("🚀 PROCESAR Y DESCARGAR DEM 2.5M (.tif)", type="primary"):
 
             geom_utm = [shapely.geometry.mapping(g) for g in vector_utm.geometry]
 
-            # ============ RECORTE ============
+            # ============ RECORTE CORRECTO ============
             with rasterio.open(temp_dem_path) as src:
                 out_image, out_transform = mask(
                     src, geom_utm, crop=True,
@@ -239,21 +238,12 @@ if st.button("🚀 PROCESAR Y DESCARGAR DEM 2.5M (.tif)", type="primary"):
                     nodata=-9999.0
                 )
 
-                interior_mask = geometry_mask(
-                    geometries=geom_utm,
-                    out_shape=(out_image.shape[1], out_image.shape[2]),
-                    transform=out_transform,
-                    invert=True,
-                    all_touched=False
-                )
-
-                out_image[0][~interior_mask] = np.float32(-9999.0)
+                # Limpieza de valores anómalos fuera del rango físico del terreno
                 mask_bad = (out_image[0] < -500.0) | (out_image[0] > 9000.0)
                 out_image[0][mask_bad] = np.float32(-9999.0)
 
                 valid_pixels = out_image[0][
-                    interior_mask
-                    & (out_image[0] > -500.0)
+                    (out_image[0] > -500.0)
                     & (out_image[0] < 9000.0)
                 ]
 
@@ -379,11 +369,8 @@ if st.button("🚀 PROCESAR Y DESCARGAR DEM 2.5M (.tif)", type="primary"):
                 )
 
             st.warning(
-                "⚠️ **IMPORTANTE para GeoLibre:** El ZIP contiene el `.tif` y el `.qml`. "
-                "**Descomprime el ZIP en una carpeta** y luego en GeoLibre: "
-                "**Capa → Añadir capa → Añadir capa ráster** → selecciona el `.tif`. "
-                "Después: clic derecho en la capa → **Propiedades** → **Cargar estilo → Desde archivo** → "
-                "selecciona el `.qml`."
+                "⚠️ **IMPORTANTE para GeoLibre / QGIS:** El ZIP contiene el `.tif` y el `.qml`. "
+                "**Descomprime el ZIP en una carpeta** y cárgalo nuevamente en tu visor."
             )
 
         except Exception as e:
