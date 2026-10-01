@@ -1,11 +1,3 @@
-import sys
-import os
-
-# Forzar la inclusión de las rutas de sistema para osgeo/gdal en Streamlit Cloud
-for system_path in ['/usr/lib/python3/dist-packages', '/usr/local/lib/python3/dist-packages']:
-    if system_path not in sys.path and os.path.exists(system_path):
-        sys.path.append(system_path)
-
 import time
 import traceback
 import numpy as np
@@ -21,6 +13,7 @@ import pystac_client
 import planetary_computer
 from osgeo import gdal
 import streamlit as st
+import os
 
 st.set_page_config(page_title="Syntro Academy - Descargador DEM 2.5m", page_icon="🛰️", layout="centered")
 
@@ -78,7 +71,6 @@ if st.button("🚀 PROCESAR Y DESCARGAR DEM 2.5M (.tif)", type="primary"):
             with open(vector_path, "wb") as f:
                 f.write(uploaded_vector.getbuffer())
 
-            # ============ LECTURA VECTORIAL ROBUSTA ============
             vector_gdf = None
             ext = uploaded_vector.name.split('.')[-1].lower()
 
