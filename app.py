@@ -46,14 +46,14 @@ with col_logo:
         st.markdown(
             "<div style='width:90px;height:90px;background:linear-gradient(135deg,#3498db,#2c3e50);"
             "border-radius:12px;display:flex;align-items:center;justify-content:center;font-size:36px;"
-            "box-shadow: 0 8px 16px rgba(0,0,0,0.4);'>🛰️</div>",
+            "box-shadow: 0 8px 16px rgba(0,0,0,0.4);'>🛰️️</div>",
             unsafe_allow_html=True
         )
 with col_title:
-    st.title("SYNTRO - DEM CUADRADO GLOBAL")
-    st.markdown("### Mosaico Continuo sin Costuras y Extensión Cuadrada")
+    st.title("SYNTRO - DEM CUADRADO LIMPIO Y CONTINUO")
+    st.markdown("### Mosaico sin Costuras ni Líneas Divisorias")
 
-st.info("Sube tu archivo vectorial (KML, KMZ, Shapefile o GeoJSON). El sistema calculará una extensión **cuadrada perfecta** centrada en tu tramo, fusionando las teselas satelitales de manera totalmente fluida para eliminar líneas divisorias.")
+st.info("Sube tu archivo vectorial (KML, KMZ, Shapefile o GeoJSON). El sistema generará un ráster cuadrado perfecto aplicando fusión por promedio en los solapes para eliminar por completo cualquier línea o costura visual.")
 
 uploaded_file = st.file_uploader(
     "Área de Estudio (Poligonal)",
@@ -91,13 +91,13 @@ def extraer_coordenadas_de_geometria(geom_dict):
             coords.append((pt[0], pt[1]))
     return coords
 
-if st.button("🚀 PROCESAR Y GENERAR MASA CUADRADA CONTINUA", type="primary"):
+if st.button("🚀 PROCESAR MASA LIMPIA Y CONTINUA", type="primary"):
     if uploaded_file:
         logs_history.clear()
         start_time = time.time()
 
         progress_bar.progress(10)
-        status_label.text("⏱ Analizando archivo y extrayendo vértices...")
+        status_label.text("⏱ Analizando geometría y extrayendo vértices...")
         registrar_log(f"Archivo recibido: {uploaded_file.name}")
 
         temp_dir = tempfile.mkdtemp()
@@ -113,7 +113,7 @@ if st.button("🚀 PROCESAR Y GENERAR MASA CUADRADA CONTINUA", type="primary"):
 
             # 1. GeoJSON / JSON
             if file_extension in ['geojson', 'json']:
-                registrar_log("Procesando formato GeoJSON...")
+                registrar_log("Leyendo formato GeoJSON...")
                 with open(input_path, 'r', encoding='utf-8') as jf:
                     data = json.load(jf)
                 
@@ -139,7 +139,7 @@ if st.button("🚀 PROCESAR Y GENERAR MASA CUADRADA CONTINUA", type="primary"):
                 if not shp_path:
                     raise Exception("No se encontró ningún archivo .shp dentro del archivo .zip.")
                 
-                registrar_log("Leyendo geometrías del Shapefile...")
+                registrar_log("Extrayendo puntos del Shapefile...")
                 sf = shapefile.Reader(shp_path)
                 for shape_obj in sf.shapes():
                     pts = [(pt[0], pt[1]) for pt in shape_obj.points]
@@ -176,7 +176,7 @@ if st.button("🚀 PROCESAR Y GENERAR MASA CUADRADA CONTINUA", type="primary"):
             if not todas_coordenadas:
                 raise Exception("No se pudieron extraer coordenadas válidas del archivo.")
 
-            # Bounding Box original y cálculo de EXTENSIÓN CUADRADA PERFECTA
+            # Cálculo de extensión estrictamente CUADRADA con holgura
             lons = [c[0] for c in todas_coordenadas]
             lats = [c[1] for c in todas_coordenadas]
             min_lon, min_lat, max_lon, max_lat = min(lons), min(lats), max(lons), max(lats)
@@ -185,7 +185,6 @@ if st.button("🚀 PROCESAR Y GENERAR MASA CUADRADA CONTINUA", type="primary"):
             height_deg = max_lat - min_lat
             max_dim = max(width_deg, height_deg)
             
-            # Añadir un margen de holgura del 15% para que luzca perfecto
             buffer_deg = max_dim * 0.15
             side = max_dim + (buffer_deg * 2)
 
@@ -197,7 +196,7 @@ if st.button("🚀 PROCESAR Y GENERAR MASA CUADRADA CONTINUA", type="primary"):
             south = center_lat - (side / 2)
             north = center_lat + (side / 2)
 
-            registrar_log(f"Bounding Box Cuadrado -> O: {west:.4f}, S: {south:.4f}, E: {east:.4f}, N: {north:.4f}")
+            registrar_log(f"Cuadrado calculado -> Oeste: {west:.4f}, Sur: {south:.4f}, Este: {east:.4f}, Norte: {north:.4f}")
             progress_bar.progress(30)
 
             # Conexión STAC Planetary Computer
@@ -210,19 +209,16 @@ if st.button("🚀 PROCESAR Y GENERAR MASA CUADRADA CONTINUA", type="primary"):
             search = catalog.search(
                 collections=["cop-dem-glo-30"],
                 bbox=[west, south, east, north],
-                limit=10
+                limit=15
             )
 
             items = list(search.item_collection())
             if not items:
-                raise Exception("No se encontraron teselas DEM globales para las coordenadas especificadas.")
+                raise Exception("No se encontraron teselas DEM para las coordenadas especificadas.")
 
-            registrar_log(f"📦 Se localizaron {len(items)} tesela(s) satelital(es). Fusionando para evitar líneas...")
-            for it in items:
-                registrar_log(f"  -> Tesela: {it.id}")
+            registrar_log(f"📦 Teselas localizadas: {len(items)}. Preparando fusión limpia sin líneas...")
             progress_bar.progress(50)
 
-            # Descargar y preparar todas las teselas para mosaico continuo
             src_files_to_mosaic = []
             for idx, item in enumerate(items):
                 url = item.assets["data"].href
@@ -237,10 +233,10 @@ if st.button("🚀 PROCESAR Y GENERAR MASA CUADRADA CONTINUA", type="primary"):
                 raise Exception("No se pudo descargar ninguna tesela DEM.")
 
             progress_bar.progress(70)
-            registrar_log("Ejecutando mosaico ráster avanzado (eliminando costuras)...")
+            registrar_log("Ejecutando mosaico avanzado con método 'mean' (promedio en solapes para eliminar cortes)...")
 
-            # Mosaico con método de fusión para evitar costuras visibles
-            mosaic_image, mosaic_transform = merge(src_files_to_mosaic, method="first")
+            # USAR method="mean" para fundir los píxeles solapados y evitar la línea de unión
+            mosaic_image, mosaic_transform = merge(src_files_to_mosaic, method="mean")
             mosaic_meta = src_files_to_mosaic[0].meta.copy()
             mosaic_meta.update({
                 "height": mosaic_image.shape[1],
@@ -257,9 +253,8 @@ if st.button("🚀 PROCESAR Y GENERAR MASA CUADRADA CONTINUA", type="primary"):
                 sf_obj.close()
 
             progress_bar.progress(85)
-            registrar_log("Recortando la extensión cuadrada perfecta...")
+            registrar_log("Generando recorte cuadrado definitivo...")
 
-            # GENERACIÓN DEL ÚNICO ARCHIVO CUADRADO VISUAL
             with rasterio.open(raw_mosaic_file) as src:
                 window = from_bounds(west, south, east, north, src.transform)
                 window = window.round_offsets().round_shape()
@@ -274,45 +269,41 @@ if st.button("🚀 PROCESAR Y GENERAR MASA CUADRADA CONTINUA", type="primary"):
                     "transform": square_transform
                 })
                 
-                square_dem_path = os.path.join(temp_dir, "DEM_Cuadrado_Visualizacion.tif")
+                square_dem_path = os.path.join(temp_dir, "DEM_Cuadrado_Limpio.tif")
                 with rasterio.open(square_dem_path, "w", **square_meta) as dest:
                     dest.write(square_image)
 
-                # Calcular estadísticas rápidas de la matriz cuadrada para el reporte
                 valid_pixels = square_image[np.isfinite(square_image)]
                 elev_min = float(np.min(valid_pixels)) if valid_pixels.size > 0 else 0.0
                 elev_max = float(np.max(valid_pixels)) if valid_pixels.size > 0 else 0.0
                 elev_range = elev_max - elev_min
 
             progress_bar.progress(95)
-            registrar_log(f"Estadísticas del área cuadrada -> Mín: {elev_min:.2f} m | Máx: {elev_max:.2f} m")
+            registrar_log(f"Rango altitudinal -> Mín: {elev_min:.2f} m | Máx: {elev_max:.2f} m")
 
-            # Reporte de texto
-            report_path = os.path.join(temp_dir, "reporte_dem_cuadrado.txt")
+            report_path = os.path.join(temp_dir, "reporte_dem_limpio.txt")
             with open(report_path, "w", encoding="utf-8") as rep:
                 rep.write("==================================================\n")
-                rep.write("  REPORTE DEM CUADRADO CONTINUO - SYNTRO\n")
+                rep.write("  REPORTE DEM CUADRADO LIMPIO - SYNTRO\n")
                 rep.write("==================================================\n")
                 rep.write(f"Archivo vectorial: {uploaded_file.name}\n")
-                rep.write(f"Teselas fusionadas: {len(items)}\n")
+                rep.write(f"Método de fusión: Promedio (Sin líneas de costura)\n")
                 rep.write(f"Elevación Mínima: {elev_min:.2f} m.s.n.m.\n")
                 rep.write(f"Elevación Máxima: {elev_max:.2f} m.s.n.m.\n")
                 rep.write(f"Rango Altitudinal: {elev_range:.2f} m\n")
                 rep.write("==================================================\n")
 
-            # Paquete ZIP con solo el raster cuadrado y su reporte
-            zip_output = os.path.join(temp_dir, "DEM_Syntro_Cuadrado.zip")
+            zip_output = os.path.join(temp_dir, "DEM_Syntro_Cuadrado_Limpio.zip")
             with zipfile.ZipFile(zip_output, "w", zipfile.ZIP_DEFLATED) as zf:
-                zf.write(square_dem_path, arcname="DEM_Cuadrado_Visualizacion.tif")
-                zf.write(report_path, arcname="reporte_dem_cuadrado.txt")
+                zf.write(square_dem_path, arcname="DEM_Cuadrado_Limpio.tif")
+                zf.write(report_path, arcname="reporte_dem_limpio.txt")
 
             elapsed_time = round(time.time() - start_time, 2)
             progress_bar.progress(100)
             status_label.text(f"⏱ ¡Proceso completado en {elapsed_time}s!")
-            st.success("¡Mosaico cuadrado continuo generado con éxito sin líneas de costura!")
+            st.success("¡Mosaico cuadrado generado con éxito y totalmente limpio de líneas!")
 
-            # Tarjetas de resultados
-            st.markdown("### 📊 Resultados Topográficos")
+            st.markdown("### 📊 Estadísticas Topográficas")
             m1, m2, m3 = st.columns(3)
             with m1:
                 st.metric(label="⛰️ Altura Mínima", value=f"{elev_min:.2f} m")
@@ -324,9 +315,9 @@ if st.button("🚀 PROCESAR Y GENERAR MASA CUADRADA CONTINUA", type="primary"):
             st.write("")
             with open(zip_output, "rb") as f_zip:
                 st.download_button(
-                    "📦 Descargar Paquete (.zip con DEM Cuadrado y Reporte)",
+                    "📦 Descargar Paquete (.zip con DEM Limpio y Reporte)",
                     f_zip,
-                    file_name="DEM_Syntro_Cuadrado.zip",
+                    file_name="DEM_Syntro_Cuadrado_Limpio.zip",
                     mime="application/zip",
                     use_container_width=True
                 )
