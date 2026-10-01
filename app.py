@@ -15,7 +15,7 @@ import requests
 import pystac_client
 import planetary_computer
 
-st.set_page_config(page_title="Syntro Academy - Descargador DEM Dinámico Global", page_icon="🛰️", layout="centered")
+st.set_page_config(page_title="Syntro Academy - Descargador DEM Dinámico Global", page_icon="🛰️️", layout="centered")
 
 st.markdown("""
     <style>
@@ -182,7 +182,6 @@ if st.button("🚀 PROCESAR POLIGONAL Y EXTRAER DEM", type="primary"):
                 if len(lista_poligonos_shapely) == 1:
                     geometria_recorte = lista_poligonos_shapely[0]
                 else:
-                    # Combinar múltiples polígonos si los hubiera
                     geometria_recorte = lista_poligonos_shapely[0]
                     for poly in lista_poligonos_shapely[1:]:
                         geometria_recorte = geometria_recorte.union(poly)
@@ -236,7 +235,7 @@ if st.button("🚀 PROCESAR POLIGONAL Y EXTRAER DEM", type="primary"):
 
             # RECORTE EXACTO PIXELES ADENTRO DE LA POLIGONAL
             with rasterio.open(raw_dem_file) as src:
-                out_image, out_transform = mask(src, geometries_geojson, crop=True)
+                out_image, out_transform = mask(src, geometrias_geojson, crop=True)
                 out_meta = src.meta.copy()
                 
                 out_meta.update({
@@ -249,14 +248,12 @@ if st.button("🚀 PROCESAR POLIGONAL Y EXTRAER DEM", type="primary"):
                 with rasterio.open(clipped_dem_path, "w", **out_meta) as dest:
                     dest.write(out_image)
 
-                # Extraer array y limpiar valores nulos o fuera de rango
                 dem_array = out_image[0]
                 nodata = src.nodatavals[0]
 
             progress_bar.progress(90)
             registrar_log("Calculando estadísticas altitudinales estrictas dentro del área...")
 
-            # Filtrar valores NoData y máscaras vacías
             valid_pixels = dem_array[dem_array > -1000]
             if nodata is not None:
                 valid_pixels = valid_pixels[valid_pixels != nodata]
