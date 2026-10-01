@@ -4,3 +4,4 @@ rasterio
 shapely
 pystac-client
 planetary-computer
+gdal>=3.8.0
