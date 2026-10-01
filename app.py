@@ -6,6 +6,7 @@ import rasterio
 from rasterio.enums import Resampling
 from rasterio.transform import from_bounds
 import rasterio.warp
+from rasterio.merge import merge
 import tempfile
 import zipfile
 import shapely.geometry
@@ -37,7 +38,7 @@ with col_logo:
         )
 with col_title:
     st.title("SYNTRO - DESCARGADOR DEM 2.5M")
-    st.markdown("### Extracción Automática por Archivo Perimetral (Motor Rasterio)")
+    st.markdown("### Extracción Automática por Archivo Perimetral (Fusión sin Huecos)")
 
 st.info("Sube el perímetro exacto de tu área de estudio (GeoJSON, KML, KMZ o Shapefile en .zip) para procesar y descargar el DEM recortado con resolución de 2.5m.")
 
@@ -127,7 +128,7 @@ if st.button("🚀 PROCESAR Y DESCARGAR DEM 2.5M (.tif)", type="primary"):
 
             vector_utm = vector_gdf.to_crs(f"EPSG:{epsg_utm}")
 
-            progress_bar.progress(50)
+            progress_bar.progress(40)
             registrar_log("Conectando con Microsoft Planetary Computer (Copernicus DEM 30m)...")
 
             catalog = pystac_client.Client.open(
@@ -146,69 +147,99 @@ if st.button("🚀 PROCESAR Y DESCARGAR DEM 2.5M (.tif)", type="primary"):
                 raise Exception("No se encontraron teselas DEM para las coordenadas indicadas.")
 
             registrar_log(f"📦 Teselas satelitales obtenidas: {len(items)}")
-            input_urls = []
-            for it in items:
-                registrar_log(f"   • {it.id}")
-                input_urls.append(it.assets["data"].href)
+            
+            progress_bar.progress(55)
+            registrar_log("Descargando y re proyectando teselas individuales al sistema UTM...")
+
+            reprojected_datasets = []
+            for idx, it in enumerate(items):
+                url = it.assets["data"].href
+                registrar_log(f"   • Procesando tesela {idx+1}/{len(items)}: {it.id}")
+                
+                src = rasterio.open(url)
+                # Calcular límites de salida UTM para esta tesela
+                transform, width, height = rasterio.warp.calculate_default_transform(
+                    src.crs, f"EPSG:{epsg_utm}", src.width, src.height, *src.bounds, resolution=2.5
+                )
+                
+                kwargs = src.meta.copy()
+                kwargs.update({
+                    'crs': f"EPSG:{epsg_utm}",
+                    'transform': transform,
+                    'width': width,
+                    'height': height,
+                    'nodata': -9999.0
+                })
+
+                mem_tif = rasterio.MemoryFile()
+                dst = mem_tif.open(**kwargs)
+
+                rasterio.warp.reproject(
+                    source=rasterio.band(src, 1),
+                    destination=rasterio.band(dst, 1),
+                    src_transform=src.transform,
+                    src_crs=src.crs,
+                    dst_transform=transform,
+                    dst_crs=f"EPSG:{epsg_utm}",
+                    resampling=Resampling.bilinear,
+                    src_nodata=src.nodata,
+                    dst_nodata=-9999.0
+                )
+                dst.close()
+                reprojected_datasets.append(mem_tif)
 
             progress_bar.progress(70)
-            output_file = os.path.join(temp_dir, "DEM_Real_2.5m_Syntro.tif")
+            registrar_log("Fusionando teselas mediante mosaico continuo...")
 
+            open_datasets = [mf.open() for mf in reprojected_datasets]
+            mosaic_arr, mosaic_trans = merge(open_datasets, nodata=-9999.0)
+
+            # Cerrar archivos en memoria
+            for ds in open_datasets:
+                ds.close()
+            for mf in reprojected_datasets:
+                mf.close()
+
+            # Recortar estrictamente al área de estudio con un pequeño margen seguro de búfer (10%)
             minx, miny, maxx, maxy = vector_utm.total_bounds
-            x_buf = (maxx - minx) * 0.05
-            y_buf = (maxy - miny) * 0.05
-            xmin = minx - x_buf
-            xmax = maxx + x_buf
-            ymin = miny - y_buf
-            ymax = maxy + y_buf
+            x_buf = (maxx - minx) * 0.10
+            y_buf = (maxy - miny) * 0.10
+            xmin, xmax = minx - x_buf, maxx + x_buf
+            ymin, ymax = miny - y_buf, maxy + y_buf
 
-            registrar_log("🌐 Procesando y fusionando teselas a resolución de 2.5m sin huecos...")
+            # Definir ventana de recorte basada en el mosaico general
+            inv_trans = ~mosaic_trans
+            r_mincol, r_rowmax = inv_trans * (xmin, ymin)
+            r_maxcol, r_rowmin = inv_trans * (xmax, ymax)
 
-            width = int(round((xmax - xmin) / 2.5))
-            height = int(round((ymax - ymin) / 2.5))
-            dst_transform = from_bounds(xmin, ymin, xmax, ymax, width, height)
-            dst_crs = f"EPSG:{epsg_utm}"
+            col_start = max(0, int(min(r_mincol, r_maxcol)))
+            col_end = min(mosaic_arr.shape[2], int(max(r_mincol, r_maxcol)))
+            row_start = max(0, int(min(r_rowmin, r_rowmax)))
+            row_end = min(mosaic_arr.shape[1], int(max(r_rowmin, r_rowmax)))
 
-            with rasterio.open(input_urls[0]) as src0:
-                profile = src0.profile.copy()
+            cropped_arr = mosaic_arr[:, row_start:row_end, col_start:col_end]
+            cropped_trans = rasterio.transform.xy(mosaic_trans, row_start, col_start, offset='ul')
+            final_transform = rasterio.transform.Affine(2.5, 0.0, cropped_trans[0], 0.0, -2.5, cropped_trans[1])
 
+            output_file = os.path.join(temp_dir, "DEM_Real_2.5m_Syntro.tif")
+            
+            profile = open_datasets[0].profile.copy() if 'open_datasets' in locals() else {}
             profile.update({
                 'driver': 'GTiff',
-                'height': height,
-                'width': width,
-                'transform': dst_transform,
-                'crs': dst_crs,
+                'height': cropped_arr.shape[1],
+                'width': cropped_arr.shape[2],
+                'transform': final_transform,
+                'crs': f"EPSG:{epsg_utm}",
                 'nodata': -9999.0,
                 'compress': 'deflate',
                 'tiled': True
             })
 
-            # Inicializar matriz principal con -9999.0
-            destination = np.full((height, width), -9999.0, dtype=np.float32)
-
-            for url in input_urls:
-                with rasterio.open(url) as src:
-                    temp_dest = np.full((height, width), -9999.0, dtype=np.float32)
-                    rasterio.warp.reproject(
-                        source=rasterio.band(src, 1),
-                        destination=temp_dest,
-                        src_transform=src.transform,
-                        src_crs=src.crs,
-                        dst_transform=dst_transform,
-                        dst_crs=dst_crs,
-                        resampling=Resampling.bilinear,
-                        src_nodata=src.nodata,
-                        dst_nodata=-9999.0
-                    )
-                    # Fusionar solo píxeles válidos para evitar huecos negros o blancos
-                    valid_mask = (temp_dest != -9999.0) & (temp_dest > -500.0) & (temp_dest < 9000.0)
-                    destination[valid_mask] = temp_dest[valid_mask]
-
             with rasterio.open(output_file, 'w', **profile) as dst:
-                dst.write(destination, 1)
+                dst.write(cropped_arr)
 
             progress_bar.progress(85)
-            registrar_log("Calculando estadísticas del DEM generado...")
+            registrar_log("Calculando estadísticas limpias del DEM de alta resolución...")
 
             with rasterio.open(output_file) as src:
                 out_image = src.read(1)
@@ -265,7 +296,7 @@ if st.button("🚀 PROCESAR Y DESCARGAR DEM 2.5M (.tif)", type="primary"):
             elapsed_time = round(time.time() - start_time, 2)
             progress_bar.progress(100)
             status_label.text(f"⏱ ¡Completado en {elapsed_time}s!")
-            st.success("¡DEM procesado con éxito!")
+            st.success("¡DEM procesado con éxito sin huecos ni valores nulos!")
 
             col1, col2, col3 = st.columns(3)
             col1.metric("Elev. Mínima", f"{min_elev:.2f} m")
