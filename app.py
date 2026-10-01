@@ -10,6 +10,7 @@ import shapefile
 import rasterio
 from rasterio.mask import mask
 from rasterio.windows import from_bounds
+from rasterio.merge import merge
 import numpy as np
 from shapely.geometry import Polygon, MultiPolygon
 import requests
@@ -23,7 +24,6 @@ st.markdown("""
     .main { background-color: #1e1e24; color: #ffffff; }
     .stApp { background-color: #1e1e24; }
     h1, h2, h3 { color: #3498db !important; }
-    /* Estilo 3D para contenedores y botones */
     div.stButton > button:first-child {
         background: linear-gradient(135deg, #3498db, #2980b9);
         color: white;
@@ -52,9 +52,9 @@ with col_logo:
         )
 with col_title:
     st.title("SYNTRO - DEM DINÁMICO GLOBAL")
-    st.markdown("### Extensión Rectangular Optimizada y Recorte Poligonal")
+    st.markdown("### Mosaico Satelital Continuo y Recorte Poligonal")
 
-st.info("Sube tu archivo vectorial (KML, KMZ, Shapefile o GeoJSON). El sistema extraerá el ráster en formato rectangular/cuadrado (bounding box del tramo) para una visualización continua perfecta en QGIS, calculando las estadísticas estrictas dentro de tu poligonal.")
+st.info("Sube tu archivo vectorial (KML, KMZ, Shapefile o GeoJSON). El sistema detectará y fusionará automáticamente todas las teselas necesarias sin cortes ni líneas divisorias, generando el ráster rectangular y el análisis poligonal exacto.")
 
 uploaded_file = st.file_uploader(
     "Área de Estudio (Poligonal)",
@@ -92,7 +92,7 @@ def extraer_coordenadas_de_geometria(geom_dict):
             coords.append((pt[0], pt[1]))
     return coords
 
-if st.button("🚀 PROCESAR Y GENERAR RÁSTER RECTANGULAR Y POLIGONAL", type="primary"):
+if st.button("🚀 PROCESAR Y FUSIONAR TESELAS DEM", type="primary"):
     if uploaded_file:
         logs_history.clear()
         start_time = time.time()
@@ -211,7 +211,7 @@ if st.button("🚀 PROCESAR Y GENERAR RÁSTER RECTANGULAR Y POLIGONAL", type="pr
             west, south, east, north = min(lons), min(lats), max(lons), max(lats)
 
             registrar_log(f"Bounding Box Rectangular -> O: {west:.4f}, S: {south:.4f}, E: {east:.4f}, N: {north:.4f}")
-            progress_bar.progress(35)
+            progress_bar.progress(30)
 
             # Conexión STAC Planetary Computer (Global)
             registrar_log("Conectando con Microsoft Planetary Computer (Copernicus DEM 30m)...")
@@ -223,33 +223,58 @@ if st.button("🚀 PROCESAR Y GENERAR RÁSTER RECTANGULAR Y POLIGONAL", type="pr
             search = catalog.search(
                 collections=["cop-dem-glo-30"],
                 bbox=[west, south, east, north],
-                limit=5
+                limit=10
             )
 
             items = list(search.item_collection())
             if not items:
                 raise Exception("No se encontraron teselas DEM globales para las coordenadas especificadas.")
 
-            registrar_log(f"📦 Tesela satelital localizada: {items[0].id}")
-            progress_bar.progress(60)
+            registrar_log(f"📦 Se localizaron {len(items)} tesela(s) satelital(es) cubriendo el área.")
+            for it in items:
+                registrar_log(f"  -> Tesela: {it.id}")
+            progress_bar.progress(50)
 
-            # Descargar tesela completa temporalmente
-            url = items[0].assets["data"].href
-            registrar_log("Descargando segmento ráster global...")
-            
-            response = requests.get(url, timeout=60)
-            if response.status_code != 200:
-                raise Exception(f"Error descargando tesela DEM (HTTP: {response.status_code})")
+            # Descargar y preparar todas las teselas encontradas para mosaico
+            src_files_to_mosaic = []
+            for idx, item in enumerate(items):
+                url = item.assets["data"].href
+                registrar_log(f"Descargando segmento [{idx+1}/{len(items)}]: {item.id}...")
+                resp = requests.get(url, timeout=60)
+                if resp.status_code == 200:
+                    tile_path = os.path.join(temp_dir, f"tile_{idx}.tif")
+                    with open(tile_path, "wb") as tf:
+                        tf.write(resp.content)
+                    src_files_to_mosaic.append(rasterio.open(tile_path))
 
-            raw_dem_file = os.path.join(temp_dir, "raw_dem.tif")
-            with open(raw_dem_file, "wb") as f:
-                f.write(response.content)
+            if not src_files_to_mosaic:
+                raise Exception("No se pudo descargar ninguna tesela DEM.")
 
-            progress_bar.progress(75)
-            registrar_log("Generando ráster rectangular continuo y máscara poligonal...")
+            progress_bar.progress(70)
+            registrar_log("Fusionando teselas en un mosaico continuo sin costuras...")
 
-            # 1. RÁSTER RECTANGULAR (Ideal para visualización continua y sin cortes en QGIS)
-            with rasterio.open(raw_dem_file) as src:
+            # Realizar mosaico de todas las teselas descargadas
+            mosaic_image, mosaic_transform = merge(src_files_to_mosaic)
+            mosaic_meta = src_files_to_mosaic[0].meta.copy()
+            mosaic_meta.update({
+                "height": mosaic_image.shape[1],
+                "width": mosaic_image.shape[2],
+                "transform": mosaic_transform
+            })
+
+            raw_mosaic_file = os.path.join(temp_dir, "raw_mosaic.tif")
+            with rasterio.open(raw_mosaic_file, "w", **mosaic_meta) as dest:
+                dest.write(mosaic_image)
+
+            # Cerrar los archivos abiertos del mosaico
+            for sf_obj in src_files_to_mosaic:
+                sf_obj.close()
+
+            progress_bar.progress(80)
+            registrar_log("Generando ráster rectangular continuo y máscara poligonal exacta...")
+
+            # 1. RÁSTER RECTANGULAR CONTINUO (Sin cortes internos)
+            with rasterio.open(raw_mosaic_file) as src:
                 window = from_bounds(west, south, east, north, src.transform)
                 window = window.round_offsets().round_shape()
                 
@@ -283,7 +308,7 @@ if st.button("🚀 PROCESAR Y GENERAR RÁSTER RECTANGULAR Y POLIGONAL", type="pr
 
                 dem_array_poly = out_image[0]
 
-            progress_bar.progress(90)
+            progress_bar.progress(95)
             registrar_log("Calculando estadísticas altitudinales estrictas dentro de la poligonal...")
 
             valid_pixels = dem_array_poly[np.isfinite(dem_array_poly)]
@@ -304,13 +329,13 @@ if st.button("🚀 PROCESAR Y GENERAR RÁSTER RECTANGULAR Y POLIGONAL", type="pr
                 rep.write("  REPORTE ESTADÍSTICO DE ELEVACIÓN - SYNTRO\n")
                 rep.write("==================================================\n")
                 rep.write(f"Archivo de poligonal: {uploaded_file.name}\n")
-                rep.write(f"Tesela fuente: {items[0].id}\n")
+                rep.write(f"Teselas fuente fusionadas: {len(items)}\n")
                 rep.write(f"Elevación Mínima: {elev_min:.2f} m.s.n.m.\n")
                 rep.write(f"Elevación Máxima: {elev_max:.2f} m.s.n.m.\n")
                 rep.write(f"Rango Altitudinal (Desnivel): {elev_range:.2f} m\n")
                 rep.write("==================================================\n")
 
-            # Empaquetar en ZIP (Ráster rectangular + Ráster poligonal + Reporte)
+            # Empaquetar en ZIP
             zip_output = os.path.join(temp_dir, "DEM_Syntro_Optimizado.zip")
             with zipfile.ZipFile(zip_output, "w", zipfile.ZIP_DEFLATED) as zf:
                 zf.write(rect_dem_path, arcname="DEM_Rectangular_Visualizacion.tif")
@@ -320,7 +345,7 @@ if st.button("🚀 PROCESAR Y GENERAR RÁSTER RECTANGULAR Y POLIGONAL", type="pr
             elapsed_time = round(time.time() - start_time, 2)
             progress_bar.progress(100)
             status_label.text(f"⏱ ¡Proceso completado en {elapsed_time}s!")
-            st.success("¡Ráster rectangular y recorte poligonal generado con éxito!")
+            st.success("¡Mosaico continuo y recorte poligonal generado con éxito!")
 
             # Tarjetas de visualización de resultados
             st.markdown("### 📊 Resultados Topográficos de la Poligonal")
@@ -335,7 +360,7 @@ if st.button("🚀 PROCESAR Y GENERAR RÁSTER RECTANGULAR Y POLIGONAL", type="pr
             st.write("")
             with open(zip_output, "rb") as f_zip:
                 st.download_button(
-                    "📦 Descargar Paquete (.zip con Ráster Rectangular, Poligonal y Reporte)",
+                    "📦 Descargar Paquete (.zip con Mosaico Rectangular, Poligonal y Reporte)",
                     f_zip,
                     file_name="DEM_Syntro_Optimizado.zip",
                     mime="application/zip",
