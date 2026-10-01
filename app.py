@@ -1,4 +1,11 @@
+import sys
 import os
+
+# Forzar la inclusión de las rutas de sistema para osgeo/gdal en Streamlit Cloud
+for system_path in ['/usr/lib/python3/dist-packages', '/usr/local/lib/python3/dist-packages']:
+    if system_path not in sys.path and os.path.exists(system_path):
+        sys.path.append(system_path)
+
 import time
 import traceback
 import numpy as np
