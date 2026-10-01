@@ -5,13 +5,13 @@ import geopandas as gpd
 import rasterio
 from rasterio.enums import Resampling
 from rasterio.transform import from_bounds
+import rasterio.warp
 import tempfile
 import zipfile
 import shapely.geometry
 import shapely.wkt
 import pystac_client
 import planetary_computer
-from osgeo import gdal
 import streamlit as st
 import os
 
@@ -37,7 +37,7 @@ with col_logo:
         )
 with col_title:
     st.title("SYNTRO - DESCARGADOR DEM 2.5M")
-    st.markdown("### Extracción Automática por Archivo Perimetral (Motor GDAL)")
+    st.markdown("### Extracción Automática por Archivo Perimetral (Motor Rasterio)")
 
 st.info("Sube el perímetro exacto de tu área de estudio (GeoJSON, KML, KMZ o Shapefile en .zip) para procesar y descargar el DEM recortado con resolución de 2.5m.")
 
@@ -88,20 +88,7 @@ if st.button("🚀 PROCESAR Y DESCARGAR DEM 2.5M (.tif)", type="primary"):
                 try:
                     vector_gdf = gpd.read_file(vector_path, driver="KML")
                 except Exception:
-                    try:
-                        vector_gdf = gpd.read_file(vector_path, driver="LIBKML")
-                    except Exception:
-                        from osgeo import ogr
-                        ogr.UseExceptions()
-                        ds = ogr.Open(vector_path)
-                        layer = ds.GetLayer(0)
-                        features = []
-                        for feat in layer:
-                            geom = feat.GetGeometryRef()
-                            if geom is not None:
-                                features.append(shapely.wkt.loads(geom.ExportToWkt()))
-                        ds = None
-                        vector_gdf = gpd.GeoDataFrame(geometry=features, crs="EPSG:4326")
+                    vector_gdf = gpd.read_file(vector_path, driver="LIBKML")
 
             elif ext == "zip":
                 with zipfile.ZipFile(vector_path, 'r') as zip_ref:
@@ -175,34 +162,54 @@ if st.button("🚀 PROCESAR Y DESCARGAR DEM 2.5M (.tif)", type="primary"):
             ymin = miny - y_buf
             ymax = maxy + y_buf
 
-            registrar_log("🌐 Procesando teselas con GDAL Warp a resolución de 2.5m...")
+            registrar_log("🌐 Procesando teselas con Rasterio Warp a resolución de 2.5m...")
 
-            warp_options = gdal.WarpOptions(
-                format='GTiff',
-                dstSRS=f"EPSG:{epsg_utm}",
-                xRes=2.5,
-                yRes=2.5,
-                resampleAlg=gdal.GRA_Bilinear,
-                outputBounds=[xmin, ymin, xmax, ymax],
-                warpMemoryLimit=512 * 1024 * 1024,
-                multithread=True,
-                creationOptions=["COMPRESS=DEFLATE", "TILED=YES"]
-            )
+            width = int(round((xmax - xmin) / 2.5))
+            height = int(round((ymax - ymin) / 2.5))
+            dst_transform = from_bounds(xmin, ymin, xmax, ymax, width, height)
 
-            result_ds = gdal.Warp(output_file, input_urls, options=warp_options)
-            if result_ds is None:
-                raise Exception("Falló la ejecución de gdal.Warp para generar el DEM.")
-            result_ds = None
+            dst_crs = {"init": f"EPSG:{epsg_utm}"} if rasterio.__version__ < "1.0" else f"EPSG:{epsg_utm}"
+
+            with rasterio.open(input_urls[0]) as src0:
+                profile = src0.profile.copy()
+
+            profile.update({
+                'driver': 'GTiff',
+                'height': height,
+                'width': width,
+                'transform': dst_transform,
+                'crs': dst_crs,
+                'nodata': -9999.0,
+                'compress': 'deflate',
+                'tiled': True
+            })
+
+            destination = np.zeros((height, width), dtype=np.float32)
+
+            for url in input_urls:
+                with rasterio.open(url) as src:
+                    rasterio.warp.reproject(
+                        source=rasterio.band(src, 1),
+                        destination=destination,
+                        src_transform=src.transform,
+                        src_crs=src.crs,
+                        dst_transform=dst_transform,
+                        dst_crs=dst_crs,
+                        resampling=Resampling.bilinear,
+                        dst_nodata=-9999.0
+                    )
+
+            with rasterio.open(output_file, 'w', **profile) as dst:
+                dst.write(destination, 1)
 
             progress_bar.progress(85)
             registrar_log("Calculando estadísticas del DEM generado...")
 
             with rasterio.open(output_file) as src:
                 out_image = src.read(1)
-                mask_bad = (out_image < -500.0) | (out_image > 9000.0)
-                out_image[mask_bad] = np.float32(-9999.0)
-
-                valid_pixels = out_image[(out_image > -500.0) & (out_image < 9000.0)]
+                mask_bad = (out_image < -500.0) | (out_image > 9000.0) | (out_image == -9999.0)
+                
+                valid_pixels = out_image[~mask_bad]
 
                 if valid_pixels.size == 0:
                     raise Exception("No se encontraron píxeles de elevación válidos dentro del área.")
