@@ -5,7 +5,9 @@ import traceback
 import tempfile
 import zipfile
 import json
-import geopandas as gpd
+import xml.etree.ElementTree as ET
+import shapefile
+from shapely.geometry import box, shape, Polygon, MultiPolygon
 import requests
 import pystac_client
 import planetary_computer
@@ -51,13 +53,35 @@ def registrar_log(mensaje):
     logs_history.append(f"[{timestamp}] {mensaje}")
     log_container.text_area("Registro de Actividad (Log):", "\n".join(logs_history), height=180)
 
+def extraer_coordenadas_de_geometria(geom_dict):
+    """Extrae una lista plana de coordenadas (lons, lats) de un diccionario de geometría GeoJSON"""
+    coords = []
+    g_type = geom_dict.get("type")
+    g_coords = geom_dict.get("coordinates", [])
+
+    if g_type == "Polygon":
+        for ring in g_coords:
+            for pt in ring:
+                coords.append((pt[0], pt[1]))
+    elif g_type == "MultiPolygon":
+        for poly in g_coords:
+            for ring in poly:
+                for pt in ring:
+                    coords.append((pt[0], pt[1]))
+    elif g_type == "Point":
+        coords.append((g_coords[0], g_coords[1]))
+    elif g_type == "LineString":
+        for pt in g_coords:
+            coords.append((pt[0], pt[1]))
+    return coords
+
 if st.button("🚀 PROCESAR Y DESCARGAR DEM (.tif)", type="primary"):
     if uploaded_file:
         logs_history.clear()
         start_time = time.time()
 
         progress_bar.progress(15)
-        status_label.text("⏱ Leyendo y normalizando geometría espacial...")
+        status_label.text("⏱ Analizando y extrayendo geometría...")
         registrar_log(f"Archivo recibido: {uploaded_file.name}")
 
         temp_dir = tempfile.mkdtemp()
@@ -69,57 +93,82 @@ if st.button("🚀 PROCESAR Y DESCARGAR DEM (.tif)", type="primary"):
             with open(input_path, "wb") as f:
                 f.write(uploaded_file.getbuffer())
 
-            # Manejo de Shapefile comprimido en ZIP
-            if file_extension == 'zip':
+            todas_coordenadas = []
+
+            # 1. Manejo de GeoJSON / JSON
+            if file_extension in ['geojson', 'json']:
+                registrar_log("Procesando formato GeoJSON...")
+                with open(input_path, 'r', encoding='utf-8') as jf:
+                    data = json.load(jf)
+                
+                if "features" in data:
+                    for feat in data["features"]:
+                        geom = feat.get("geometry")
+                        if geom:
+                            todas_coordenadas.extend(extraer_coordenadas_de_geometria(geom))
+                elif "geometry" in data:
+                    todas_coordenadas.extend(extraer_coordenadas_de_geometria(data["geometry"]))
+
+            # 2. Manejo de Shapefile comprimido en ZIP
+            elif file_extension == 'zip':
                 registrar_log("Descomprimiendo Shapefile (.zip)...")
                 with zipfile.ZipFile(input_path, 'r') as zip_ref:
                     zip_ref.extractall(temp_dir)
                 
-                # Buscar el archivo .shp dentro de la carpeta descomprimida
-                shp_file = None
+                shp_path = None
                 for root, dirs, files in os.walk(temp_dir):
                     for file in files:
                         if file.endswith('.shp'):
-                            shp_file = os.path.join(root, file)
+                            shp_path = os.path.join(root, file)
                             break
-                if not shp_file:
+                if not shp_path:
                     raise Exception("No se encontró ningún archivo .shp dentro del archivo .zip.")
                 
-                gdf = gpd.read_file(shp_file)
+                registrar_log("Leyendo geometrías del Shapefile...")
+                sf = shapefile.Reader(shp_path)
+                for shape_obj in sf.shapes():
+                    for pt in shape_obj.points:
+                        todas_coordenadas.append((pt[0], pt[1]))
 
-            # Manejo de KML o KMZ
+            # 3. Manejo de KML o KMZ
             elif file_extension in ['kml', 'kmz']:
                 registrar_log(f"Procesando archivo {file_extension.upper()}...")
-                # Habilitar driver KML en Fiona/Geopandas
-                gpd.io.file.fiona.drvsupport.supported_drivers['KML'] = 'rw'
-                gpd.io.file.fiona.drvsupport.supported_drivers['LIBKML'] = 'rw'
-                
+                kml_content = None
+
                 if file_extension == 'kmz':
-                    # Extraer el kml dentro del kmz
                     with zipfile.ZipFile(input_path, 'r') as kmz_ref:
                         kml_filename = [name for name in kmz_ref.namelist() if name.endswith('.kml')][0]
-                        kmz_ref.extract(kml_filename, temp_dir)
-                        kml_path = os.path.join(temp_dir, kml_filename)
-                    gdf = gpd.read_file(kml_path, driver='KML')
+                        with kmz_ref.open(kml_filename) as kf:
+                            kml_content = kf.read()
                 else:
-                    gdf = gpd.read_file(input_path, driver='KML')
+                    with open(input_path, 'rb') as kf:
+                        kml_content = kf.read()
 
-            # Manejo de GeoJSON o JSON
-            elif file_extension in ['geojson', 'json']:
-                registrar_log("Procesando formato GeoJSON...")
-                gdf = gpd.read_file(input_path)
+                # Parsear XML del KML buscando etiquetas de coordenadas <coordinates>
+                root = ET.fromstring(kml_content)
+                # Namespace común en KML
+                for elem in root.iter():
+                    if elem.tag.endswith('coordinates') and elem.text:
+                        coords_text = elem.text.strip()
+                        for tuple_str in coords_text.split():
+                            parts = tuple_str.split(',')
+                            if len(parts) >= 2:
+                                try:
+                                    lon, lat = float(parts[0]), float(parts[1])
+                                    todas_coordenadas.append((lon, lat))
+                                except ValueError:
+                                    continue
 
             else:
                 raise Exception("Formato de archivo no soportado.")
 
-            # Asegurar que esté en coordenadas geográficas WGS84 (EPSG:4326)
-            if gdf.crs is not None and gdf.crs != "EPSG:4326":
-                registrar_log(f"Reproyectando desde {gdf.crs} a WGS84 (EPSG:4326)...")
-                gdf = gdf.to_crs("EPSG:4326")
+            if not todas_coordenadas:
+                raise Exception("No se pudieron extraer coordenadas válidas del archivo proporcionado.")
 
-            # Obtener el Bounding Box global de todas las geometrías
-            total_bounds = gdf.total_bounds  # [minx, miny, maxx, maxy]
-            west, south, east, north = total_bounds[0], total_bounds[1], total_bounds[2], total_bounds[3]
+            # Calcular Bounding Box global
+            lons = [c[0] for c in todas_coordenadas]
+            lats = [c[1] for c in todas_coordenadas]
+            west, south, east, north = min(lons), min(lats), max(lons), max(lats)
 
             registrar_log(f"Extensión detectada -> Oeste: {west:.5f}, Sur: {south:.5f}, Este: {east:.5f}, Norte: {north:.5f}")
             progress_bar.progress(45)
@@ -138,12 +187,11 @@ if st.button("🚀 PROCESAR Y DESCARGAR DEM (.tif)", type="primary"):
 
             items = list(search.item_collection())
             if not items:
-                raise Exception("No se encontraron teselas DEM para las coordenadas del área seleccionada.")
+                raise Exception("No se encontraron teselas DEM para las coordenadas de la zona.")
 
             registrar_log(f"📦 Tesela satelital localizada: {items[0].id}")
             progress_bar.progress(70)
 
-            # Descargar archivo DEM directamente desde la URL firmada
             url = items[0].assets["data"].href
             registrar_log("Descargando segmento de elevación...")
             
@@ -156,7 +204,7 @@ if st.button("🚀 PROCESAR Y DESCARGAR DEM (.tif)", type="primary"):
                 f.write(response.content)
 
             progress_bar.progress(90)
-            registrar_log("Generando paquete comprimido final...")
+            registrar_log("Generando archivo comprimido final...")
 
             zip_output = os.path.join(temp_dir, "DEM_Syntro_Cloud.zip")
             with zipfile.ZipFile(zip_output, "w", zipfile.ZIP_DEFLATED) as zf:
