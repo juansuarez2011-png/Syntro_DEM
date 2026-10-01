@@ -17,7 +17,7 @@ import planetary_computer
 from pyproj import Transformer
 
 st.set_page_config(
-    title="Syntro Academy - Descargador DEM 2.5m (Píxel Fino)", 
+    page_title="Syntro Academy - Descargador DEM 2.5m (Píxel Fino)", 
     page_icon="🛰️", 
     layout="wide"
 )
@@ -256,7 +256,6 @@ if st.button("🚀 INICIAR PROCESO DEM 2.5M", type="primary"):
             output_dem_file = os.path.join(temp_dir, "DEM_Real_2.5m_Syntro.tif")
 
             with rasterio.open(temp_mosaic_path) as src:
-                # Transformación y cálculo de límites UTM con 2% de búfer
                 transformer = Transformer.from_crs("EPSG:4326", dst_crs, always_xy=True)
                 xmin_utm, ymin_utm = transformer.transform(west, south)
                 xmax_utm, ymax_utm = transformer.transform(east, north)
@@ -269,7 +268,6 @@ if st.button("🚀 INICIAR PROCESO DEM 2.5M", type="primary"):
                 ymin = ymin_utm - y_buf
                 ymax = ymax_utm + y_buf
 
-                # Cálculo de dimensiones para resolución exacta de 2.5m
                 width = int(np.ceil((xmax - xmin) / 2.5))
                 height = int(np.ceil((ymax - ymin) / 2.5))
 
@@ -299,7 +297,6 @@ if st.button("🚀 INICIAR PROCESO DEM 2.5M", type="primary"):
             progress_bar.progress(90)
             registrar_log(f"Archivo generado correctamente: {output_dem_file}")
 
-            # Lectura de estadísticas topográficas
             with rasterio.open(output_dem_file) as src:
                 arr = src.read(1)
                 valid_pixels = arr[np.isfinite(arr) & (arr != src.nodata)]
