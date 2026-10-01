@@ -3,14 +3,10 @@ import traceback
 import numpy as np
 import geopandas as gpd
 import rasterio
+import rasterio.mask
 from rasterio.enums import Resampling
-from rasterio.transform import from_bounds
-import rasterio.warp
-from rasterio.merge import merge
 import tempfile
 import zipfile
-import shapely.geometry
-import shapely.wkt
 import pystac_client
 import planetary_computer
 import streamlit as st
@@ -38,9 +34,9 @@ with col_logo:
         )
 with col_title:
     st.title("SYNTRO - DESCARGADOR DEM RÁPIDO")
-    st.markdown("### Extracción Optimizada por Archivo Perimetral (Alta Velocidad)")
+    st.markdown("### Extracción Directa por Enmascaramiento Vectorial")
 
-st.info("Sube el perímetro exacto de tu área de estudio (GeoJSON, KML, KMZ o Shapefile en .zip) para procesar el DEM optimizado a 5m de resolución.")
+st.info("Sube el perímetro exacto de tu área de estudio (GeoJSON, KML, KMZ o Shapefile en .zip) para descargar el DEM optimizado.")
 
 uploaded_vector = st.file_uploader(
     "Perímetro del Área de Estudio (GeoJSON, KML, KMZ, SHP en .zip)",
@@ -57,7 +53,7 @@ def registrar_log(mensaje):
     logs_history.append(f"[{timestamp}] {mensaje}")
     log_container.text_area("Registro de Actividad (Log):", "\n".join(logs_history), height=180)
 
-if st.button("🚀 PROCESAR Y DESCARGAR DEM OPTIMIZADO (.tif)", type="primary"):
+if st.button("🚀 PROCESAR Y DESCARGAR DEM (.tif)", type="primary"):
     if uploaded_vector:
         logs_history.clear()
         start_time = time.time()
@@ -126,9 +122,7 @@ if st.button("🚀 PROCESAR Y DESCARGAR DEM OPTIMIZADO (.tif)", type="primary"):
 
             registrar_log(f"Zona UTM asignada: EPSG:{epsg_utm} (Zona {utm_zone} {hemisphere.upper()})")
 
-            vector_utm = vector_gdf.to_crs(f"EPSG:{epsg_utm}")
-
-            progress_bar.progress(40)
+            progress_bar.progress(45)
             registrar_log("Conectando con Microsoft Planetary Computer (Copernicus DEM 30m)...")
 
             catalog = pystac_client.Client.open(
@@ -139,124 +133,62 @@ if st.button("🚀 PROCESAR Y DESCARGAR DEM OPTIMIZADO (.tif)", type="primary"):
             search = catalog.search(
                 collections=["cop-dem-glo-30"],
                 bbox=[west, south, east, north],
-                limit=50
+                limit=10
             )
 
             items = list(search.item_collection())
             if not items:
                 raise Exception("No se encontraron teselas DEM para las coordenadas indicadas.")
 
-            registrar_log(f"📦 Teselas satelitales obtenidas: {len(items)}")
+            registrar_log(f"📦 Teselas encontradas: {len(items)}")
             
-            progress_bar.progress(55)
-            registrar_log("Descargando y optimizando teselas al sistema UTM (Resolución: 5m)...")
+            progress_bar.progress(60)
+            registrar_log("Extrayendo y recortando directamente sobre la tesela principal...")
 
-            reprojected_datasets = []
+            # Tomar la primera tesela que intersecta y aplicar máscara geométrica exacta
+            url = items[0].assets["data"].href
             
-            with rasterio.Env(CHECK_DISK_FREE_SPACE=False):
-                for idx, it in enumerate(items):
-                    url = it.assets["data"].href
-                    registrar_log(f"   • Procesando tesela {idx+1}/{len(items)}: {it.id}")
-                    
-                    src = rasterio.open(url)
-                    # Resolución ajustada a 5 metros para garantizar velocidad y estabilidad de memoria
-                    transform, width, height = rasterio.warp.calculate_default_transform(
-                        src.crs, f"EPSG:{epsg_utm}", src.width, src.height, *src.bounds, resolution=5.0
-                    )
-                    
-                    kwargs = src.meta.copy()
-                    kwargs.update({
-                        'crs': f"EPSG:{epsg_utm}",
-                        'transform': transform,
-                        'width': width,
-                        'height': height,
-                        'nodata': -9999.0
-                    })
+            with rasterio.open(url) as src:
+                # Reproyectar geometrías vectoriales al CRS de la tesela DEM
+                vector_projected = vector_gdf.to_crs(src.crs)
+                geometries = [geom for geom in vector_projected.geometry]
 
-                    mem_tif = rasterio.MemoryFile()
-                    dst = mem_tif.open(**kwargs)
+                # Aplicar enmascaramiento con rasterio
+                out_image, out_transform = rasterio.mask.mask(src, geometries, crop=True, nodata=-9999.0)
+                out_meta = src.meta.copy()
 
-                    rasterio.warp.reproject(
-                        source=rasterio.band(src, 1),
-                        destination=rasterio.band(dst, 1),
-                        src_transform=src.transform,
-                        src_crs=src.crs,
-                        dst_transform=transform,
-                        dst_crs=f"EPSG:{epsg_utm}",
-                        resampling=Resampling.bilinear,
-                        src_nodata=src.nodata,
-                        dst_nodata=-9999.0
-                    )
-                    dst.close()
-                    reprojected_datasets.append(mem_tif)
+            out_meta.update({
+                "driver": "GTiff",
+                "height": out_image.shape[1],
+                "width": out_image.shape[2],
+                "transform": out_transform,
+                "nodata": -9999.0,
+                "compress": "deflate",
+                "tiled": True
+            })
 
-                progress_bar.progress(70)
-                registrar_log("Fusionando teselas mediante mosaico continuo...")
-
-                open_datasets = [mf.open() for mf in reprojected_datasets]
-                mosaic_arr, mosaic_trans = merge(open_datasets, nodata=-9999.0)
-
-                for ds in open_datasets:
-                    ds.close()
-                for mf in reprojected_datasets:
-                    mf.close()
-
-                minx, miny, maxx, maxy = vector_utm.total_bounds
-                x_buf = (maxx - minx) * 0.10
-                y_buf = (maxy - miny) * 0.10
-                xmin, xmax = minx - x_buf, maxx + x_buf
-                ymin, ymax = miny - y_buf, maxy + y_buf
-
-                inv_trans = ~mosaic_trans
-                r_mincol, r_rowmax = inv_trans * (xmin, ymin)
-                r_maxcol, r_rowmin = inv_trans * (xmax, ymax)
-
-                col_start = max(0, int(min(r_mincol, r_maxcol)))
-                col_end = min(mosaic_arr.shape[2], int(max(r_mincol, r_maxcol)))
-                row_start = max(0, int(min(r_rowmin, r_rowmax)))
-                row_end = min(mosaic_arr.shape[1], int(max(r_rowmin, r_rowmax)))
-
-                cropped_arr = mosaic_arr[:, row_start:row_end, col_start:col_end]
-                cropped_trans = rasterio.transform.xy(mosaic_trans, row_start, col_start, offset='ul')
-                final_transform = rasterio.transform.Affine(5.0, 0.0, cropped_trans[0], 0.0, -5.0, cropped_trans[1])
-
-                output_file = os.path.join(temp_dir, "DEM_Optimizad_5m_Syntro.tif")
-                
-                profile = open_datasets[0].profile.copy() if 'open_datasets' in locals() else {}
-                profile.update({
-                    'driver': 'GTiff',
-                    'height': cropped_arr.shape[1],
-                    'width': cropped_arr.shape[2],
-                    'transform': final_transform,
-                    'crs': f"EPSG:{epsg_utm}",
-                    'nodata': -9999.0,
-                    'compress': 'deflate',
-                    'tiled': True
-                })
-
-                with rasterio.open(output_file, 'w', **profile) as dst:
-                    dst.write(cropped_arr)
+            output_file = os.path.join(temp_dir, "DEM_Syntro_Recortado.tif")
+            with rasterio.open(output_file, "w", **out_meta) as dest:
+                dest.write(out_image)
 
             progress_bar.progress(85)
-            registrar_log("Calculando estadísticas limpias del DEM...")
+            registrar_log("Calculando estadísticas del DEM...")
 
             with rasterio.open(output_file) as src:
-                out_image = src.read(1)
-                mask_bad = (out_image < -500.0) | (out_image > 9000.0) | (out_image == -9999.0)
-                valid_pixels = out_image[~mask_bad]
+                raster_data = src.read(1)
+                valid_pixels = raster_data[(raster_data != -9999.0) & (raster_data > -500.0) & (raster_data < 9000.0)]
 
                 if valid_pixels.size == 0:
-                    raise Exception("No se encontraron píxeles de elevación válidos dentro del área.")
+                    raise Exception("No se encontraron píxeles de elevación válidos dentro de la máscara.")
 
                 min_elev = float(np.min(valid_pixels))
                 max_elev = float(np.max(valid_pixels))
                 mean_elev = float(np.mean(valid_pixels))
 
-            registrar_log("📊 Estadísticas reales capturadas:")
+            registrar_log("📊 Estadísticas capturadas:")
             registrar_log(f"   • Mínimo : {min_elev:.2f} m")
             registrar_log(f"   • Máximo : {max_elev:.2f} m")
             registrar_log(f"   • Promedio: {mean_elev:.2f} m")
-            registrar_log(f"   • Píxeles válidos: {valid_pixels.size:,}")
 
             qml_path = output_file.replace(".tif", ".qml")
             qml_content = f"""<!DOCTYPE qgis PUBLIC 'http://mrcc.com/qgis.dtd' 'SYSTEM'>
@@ -287,15 +219,15 @@ if st.button("🚀 PROCESAR Y DESCARGAR DEM OPTIMIZADO (.tif)", type="primary"):
             with open(qml_path, "w", encoding="utf-8") as f_qml:
                 f_qml.write(qml_content)
 
-            zip_output = os.path.join(temp_dir, "DEM_Optimizad_5m_Syntro.zip")
+            zip_output = os.path.join(temp_dir, "DEM_Syntro_Recortado.zip")
             with zipfile.ZipFile(zip_output, "w", zipfile.ZIP_DEFLATED) as zf:
-                zf.write(output_file, arcname="DEM_Optimizad_5m_Syntro.tif")
-                zf.write(qml_path, arcname="DEM_Optimizad_5m_Syntro.qml")
+                zf.write(output_file, arcname="DEM_Syntro_Recortado.tif")
+                zf.write(qml_path, arcname="DEM_Syntro_Recortado.qml")
 
             elapsed_time = round(time.time() - start_time, 2)
             progress_bar.progress(100)
             status_label.text(f"⏱ ¡Completado en {elapsed_time}s!")
-            st.success("¡DEM procesado con éxito y de forma inmediata!")
+            st.success("¡DEM procesado y recortado con éxito!")
 
             col1, col2, col3 = st.columns(3)
             col1.metric("Elev. Mínima", f"{min_elev:.2f} m")
@@ -306,7 +238,7 @@ if st.button("🚀 PROCESAR Y DESCARGAR DEM OPTIMIZADO (.tif)", type="primary"):
                 st.download_button(
                     "📦 Descargar DEM + Estilo de Color (.zip)",
                     f_zip,
-                    file_name="DEM_Optimizad_5m_Syntro.zip",
+                    file_name="DEM_Syntro_Recortado.zip",
                     mime="application/zip",
                     use_container_width=True
                 )
