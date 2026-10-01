@@ -1,18 +1,19 @@
-import streamlit as st
 import os
 import time
 import traceback
 import numpy as np
 import geopandas as gpd
 import rasterio
-from rasterio.mask import mask
 from rasterio.enums import Resampling
 from rasterio.transform import from_bounds
 import tempfile
 import zipfile
 import shapely.geometry
+import shapely.wkt
 import pystac_client
 import planetary_computer
+from osgeo import gdal
+import streamlit as st
 
 st.set_page_config(page_title="Syntro Academy - Descargador DEM 2.5m", page_icon="🛰️", layout="centered")
 
@@ -36,9 +37,9 @@ with col_logo:
         )
 with col_title:
     st.title("SYNTRO - DESCARGADOR DEM 2.5M")
-    st.markdown("### Extracción Automática por Archivo Perimetral")
+    st.markdown("### Extracción Automática por Archivo Perimetral (Motor GDAL)")
 
-st.info("Sube el perímetro exacto de tu área de estudio (GeoJSON, KML, KMZ o Shapefile en .zip) para procesar y descargar el DEM recortado.")
+st.info("Sube el perímetro exacto de tu área de estudio (GeoJSON, KML, KMZ o Shapefile en .zip) para procesar y descargar el DEM recortado con resolución de 2.5m.")
 
 uploaded_vector = st.file_uploader(
     "Perímetro del Área de Estudio (GeoJSON, KML, KMZ, SHP en .zip)",
@@ -119,7 +120,6 @@ if st.button("🚀 PROCESAR Y DESCARGAR DEM 2.5M (.tif)", type="primary"):
 
             vector_gdf = vector_gdf[vector_gdf.geometry.notnull()].copy()
 
-            # Asegurar asignación inicial WGS84 si carece de CRS
             if vector_gdf.crs is None:
                 vector_gdf.set_crs("EPSG:4326", inplace=True)
             else:
@@ -128,11 +128,9 @@ if st.button("🚀 PROCESAR Y DESCARGAR DEM 2.5M (.tif)", type="primary"):
             registrar_log(f"✅ Perímetro cargado correctamente: {len(vector_gdf)} feature(s)")
             progress_bar.progress(30)
 
-            # Obtener límites exactos en WGS84 para la consulta STAC
             west, south, east, north = vector_gdf.total_bounds
             registrar_log(f"Extensión WGS84 -> Oeste: {west:.5f}, Sur: {south:.5f}, Este: {east:.5f}, Norte: {north:.5f}")
 
-            # Calcular Zona UTM automática basada en el centroide
             center_lon = (west + east) / 2.0
             center_lat = (south + north) / 2.0
             utm_zone = int((center_lon + 180) / 6) + 1
@@ -141,11 +139,10 @@ if st.button("🚀 PROCESAR Y DESCARGAR DEM 2.5M (.tif)", type="primary"):
 
             registrar_log(f"Zona UTM asignada: EPSG:{epsg_utm} (Zona {utm_zone} {hemisphere.upper()})")
 
-            # Reproyectar el vector a UTM para operaciones métricas precisas
             vector_utm = vector_gdf.to_crs(f"EPSG:{epsg_utm}")
 
             progress_bar.progress(50)
-            registrar_log("Conectando con Microsoft Planetary Computer (Copernicus DEM)...")
+            registrar_log("Conectando con Microsoft Planetary Computer (Copernicus DEM 30m)...")
 
             catalog = pystac_client.Client.open(
                 "https://planetarycomputer.microsoft.com/api/stac/v1",
@@ -163,110 +160,64 @@ if st.button("🚀 PROCESAR Y DESCARGAR DEM 2.5M (.tif)", type="primary"):
                 raise Exception("No se encontraron teselas DEM para las coordenadas indicadas.")
 
             registrar_log(f"📦 Teselas satelitales obtenidas: {len(items)}")
+            input_urls = []
             for it in items:
                 registrar_log(f"   • {it.id}")
+                input_urls.append(it.assets["data"].href)
 
             progress_bar.progress(70)
             output_file = os.path.join(temp_dir, "DEM_Real_2.5m_Syntro.tif")
 
             minx, miny, maxx, maxy = vector_utm.total_bounds
-            buffer_m = 150.0  # Buffer de seguridad para evitar bordes vacíos
-            b_minx, b_miny = minx - buffer_m, miny - buffer_m
-            b_maxx, b_maxy = maxx + buffer_m, maxy + buffer_m
+            x_buf = (maxx - minx) * 0.05
+            y_buf = (maxy - miny) * 0.05
+            xmin = minx - x_buf
+            xmax = maxx + x_buf
+            ymin = miny - y_buf
+            ymax = maxy + y_buf
 
-            res = 2.5
-            width = int(round((b_maxx - b_minx) / res))
-            height = int(round((b_maxy - b_miny) / res))
-            transform_25m = from_bounds(b_minx, b_miny, b_maxx, b_maxy, width, height)
+            registrar_log("🌐 Procesando teselas con GDAL Warp a resolución de 2.5m...")
 
-            reprojected_data = np.full((1, height, width), -9999.0, dtype=np.float32)
+            warp_options = gdal.WarpOptions(
+                format='GTiff',
+                dstSRS=f"EPSG:{epsg_utm}",
+                xRes=2.5,
+                yRes=2.5,
+                resampleAlg=gdal.GRA_Bilinear,
+                outputBounds=[xmin, ymin, xmax, ymax],
+                warpMemoryLimit=512 * 1024 * 1024,
+                multithread=True,
+                creationOptions=["COMPRESS=DEFLATE", "TILED=YES"]
+            )
 
-            registrar_log(f"🌐 Muestreando teselas a resolución de 2.5m...")
-
-            for idx, item in enumerate(items):
-                try:
-                    dem_url = item.assets["data"].href
-                    with rasterio.open(dem_url) as src:
-                        src_nodata = src.nodata if src.nodata is not None else -9999.0
-                        tile_data = np.full((height, width), -9999.0, dtype=np.float32)
-
-                        rasterio.warp.reproject(
-                            source=rasterio.band(src, 1),
-                            destination=tile_data,
-                            src_transform=src.transform,
-                            src_crs=src.crs,
-                            dst_transform=transform_25m,
-                            dst_crs=f"EPSG:{epsg_utm}",
-                            resampling=Resampling.cubic,
-                            src_nodata=src_nodata,
-                            dst_nodata=-9999.0
-                        )
-
-                        valid_tile = (tile_data > -500.0) & (tile_data < 9000.0)
-                        reprojected_data[0][valid_tile] = tile_data[valid_tile]
-                except Exception as e_tile:
-                    registrar_log(f"⚠️ Aviso en tesela {item.id}: {e_tile}")
-                    continue
-
-            temp_dem_path = os.path.join(temp_dir, "temp_reprojected.tif")
-            with rasterio.open(
-                temp_dem_path, "w", driver="GTiff",
-                height=height, width=width, count=1,
-                dtype="float32", crs=f"EPSG:{epsg_utm}",
-                transform=transform_25m, nodata=-9999.0,
-                compress="lzw", tiled=True
-            ) as dst:
-                dst.write(reprojected_data)
+            result_ds = gdal.Warp(output_file, input_urls, options=warp_options)
+            if result_ds is None:
+                raise Exception("Falló la ejecución de gdal.Warp para generar el DEM.")
+            result_ds = None
 
             progress_bar.progress(85)
-            registrar_log("Aplicando recorte estricto por geometría perimetral...")
+            registrar_log("Calculando estadísticas del DEM generado...")
 
-            geom_utm = [shapely.geometry.mapping(g) for g in vector_utm.geometry]
+            with rasterio.open(output_file) as src:
+                out_image = src.read(1)
+                mask_bad = (out_image < -500.0) | (out_image > 9000.0)
+                out_image[mask_bad] = np.float32(-9999.0)
 
-            with rasterio.open(temp_dem_path) as src:
-                out_image, out_transform = mask(
-                    src, geom_utm, crop=True,
-                    all_touched=False,
-                    filled=True,
-                    nodata=-9999.0
-                )
-
-                # Filtrar valores fuera de rango físico lógico
-                mask_bad = (out_image[0] < -500.0) | (out_image[0] > 9000.0)
-                out_image[0][mask_bad] = np.float32(-9999.0)
-
-                valid_pixels = out_image[0][
-                    (out_image[0] > -500.0) & (out_image[0] < 9000.0)
-                ]
+                valid_pixels = out_image[(out_image > -500.0) & (out_image < 9000.0)]
 
                 if valid_pixels.size == 0:
-                    raise Exception("No se encontraron píxeles de elevación válidos dentro del polígono. Verifica que el polígono esté sobre tierra firme.")
+                    raise Exception("No se encontraron píxeles de elevación válidos dentro del área.")
 
                 min_elev = float(np.min(valid_pixels))
                 max_elev = float(np.max(valid_pixels))
                 mean_elev = float(np.mean(valid_pixels))
 
-                registrar_log("📊 Estadísticas reales capturadas:")
-                registrar_log(f"   • Mínimo : {min_elev:.2f} m")
-                registrar_log(f"   • Máximo : {max_elev:.2f} m")
-                registrar_log(f"   • Promedio: {mean_elev:.2f} m")
-                registrar_log(f"   • Píxeles válidos: {valid_pixels.size:,}")
+            registrar_log("📊 Estadísticas reales capturadas:")
+            registrar_log(f"   • Mínimo : {min_elev:.2f} m")
+            registrar_log(f"   • Máximo : {max_elev:.2f} m")
+            registrar_log(f"   • Promedio: {mean_elev:.2f} m")
+            registrar_log(f"   • Píxeles válidos: {valid_pixels.size:,}")
 
-                with rasterio.open(
-                    output_file, "w", driver="GTiff",
-                    height=out_image.shape[1],
-                    width=out_image.shape[2],
-                    count=1, dtype="float32",
-                    crs=f"EPSG:{epsg_utm}",
-                    transform=out_transform,
-                    nodata=-9999.0,
-                    compress="lzw",
-                    tiled=True
-                ) as dst_out:
-                    dst_out.write(out_image)
-                    dst_out.set_band_description(1, "Elevacion_m")
-
-            # Generar archivo de estilo QML automático con el rango real capturado
             qml_path = output_file.replace(".tif", ".qml")
             qml_content = f"""<!DOCTYPE qgis PUBLIC 'http://mrcc.com/qgis.dtd' 'SYSTEM'>
 <qgis version="3.34.0" styleCategories="AllStyleCategories">
