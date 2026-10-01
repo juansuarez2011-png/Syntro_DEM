@@ -162,13 +162,12 @@ if st.button("🚀 PROCESAR Y DESCARGAR DEM 2.5M (.tif)", type="primary"):
             ymin = miny - y_buf
             ymax = maxy + y_buf
 
-            registrar_log("🌐 Procesando teselas con Rasterio Warp a resolución de 2.5m...")
+            registrar_log("🌐 Procesando y fusionando teselas a resolución de 2.5m sin huecos...")
 
             width = int(round((xmax - xmin) / 2.5))
             height = int(round((ymax - ymin) / 2.5))
             dst_transform = from_bounds(xmin, ymin, xmax, ymax, width, height)
-
-            dst_crs = {"init": f"EPSG:{epsg_utm}"} if rasterio.__version__ < "1.0" else f"EPSG:{epsg_utm}"
+            dst_crs = f"EPSG:{epsg_utm}"
 
             with rasterio.open(input_urls[0]) as src0:
                 profile = src0.profile.copy()
@@ -184,20 +183,26 @@ if st.button("🚀 PROCESAR Y DESCARGAR DEM 2.5M (.tif)", type="primary"):
                 'tiled': True
             })
 
-            destination = np.zeros((height, width), dtype=np.float32)
+            # Inicializar matriz principal con -9999.0
+            destination = np.full((height, width), -9999.0, dtype=np.float32)
 
             for url in input_urls:
                 with rasterio.open(url) as src:
+                    temp_dest = np.full((height, width), -9999.0, dtype=np.float32)
                     rasterio.warp.reproject(
                         source=rasterio.band(src, 1),
-                        destination=destination,
+                        destination=temp_dest,
                         src_transform=src.transform,
                         src_crs=src.crs,
                         dst_transform=dst_transform,
                         dst_crs=dst_crs,
                         resampling=Resampling.bilinear,
+                        src_nodata=src.nodata,
                         dst_nodata=-9999.0
                     )
+                    # Fusionar solo píxeles válidos para evitar huecos negros o blancos
+                    valid_mask = (temp_dest != -9999.0) & (temp_dest > -500.0) & (temp_dest < 9000.0)
+                    destination[valid_mask] = temp_dest[valid_mask]
 
             with rasterio.open(output_file, 'w', **profile) as dst:
                 dst.write(destination, 1)
@@ -208,7 +213,6 @@ if st.button("🚀 PROCESAR Y DESCARGAR DEM 2.5M (.tif)", type="primary"):
             with rasterio.open(output_file) as src:
                 out_image = src.read(1)
                 mask_bad = (out_image < -500.0) | (out_image > 9000.0) | (out_image == -9999.0)
-                
                 valid_pixels = out_image[~mask_bad]
 
                 if valid_pixels.size == 0:
