@@ -16,7 +16,7 @@ import planetary_computer
 import streamlit as st
 import os
 
-st.set_page_config(page_title="Syntro Academy - Descargador DEM 2.5m", page_icon="🛰️", layout="centered")
+st.set_page_config(page_title="Syntro Academy - Descargador DEM Rápido", page_icon="🛰️", layout="centered")
 
 st.markdown("""
     <style>
@@ -37,10 +37,10 @@ with col_logo:
             unsafe_allow_html=True
         )
 with col_title:
-    st.title("SYNTRO - DESCARGADOR DEM 2.5M")
-    st.markdown("### Extracción Automática por Archivo Perimetral (Fusión sin Huecos)")
+    st.title("SYNTRO - DESCARGADOR DEM RÁPIDO")
+    st.markdown("### Extracción Optimizada por Archivo Perimetral (Alta Velocidad)")
 
-st.info("Sube el perímetro exacto de tu área de estudio (GeoJSON, KML, KMZ o Shapefile en .zip) para procesar y descargar el DEM recortado con resolución de 2.5m.")
+st.info("Sube el perímetro exacto de tu área de estudio (GeoJSON, KML, KMZ o Shapefile en .zip) para procesar el DEM optimizado a 5m de resolución.")
 
 uploaded_vector = st.file_uploader(
     "Perímetro del Área de Estudio (GeoJSON, KML, KMZ, SHP en .zip)",
@@ -57,7 +57,7 @@ def registrar_log(mensaje):
     logs_history.append(f"[{timestamp}] {mensaje}")
     log_container.text_area("Registro de Actividad (Log):", "\n".join(logs_history), height=180)
 
-if st.button("🚀 PROCESAR Y DESCARGAR DEM 2.5M (.tif)", type="primary"):
+if st.button("🚀 PROCESAR Y DESCARGAR DEM OPTIMIZADO (.tif)", type="primary"):
     if uploaded_vector:
         logs_history.clear()
         start_time = time.time()
@@ -149,19 +149,19 @@ if st.button("🚀 PROCESAR Y DESCARGAR DEM 2.5M (.tif)", type="primary"):
             registrar_log(f"📦 Teselas satelitales obtenidas: {len(items)}")
             
             progress_bar.progress(55)
-            registrar_log("Descargando y re proyectando teselas individuales al sistema UTM...")
+            registrar_log("Descargando y optimizando teselas al sistema UTM (Resolución: 5m)...")
 
             reprojected_datasets = []
             
-            # Desactivar la verificación estricta de espacio en disco de GDAL
             with rasterio.Env(CHECK_DISK_FREE_SPACE=False):
                 for idx, it in enumerate(items):
                     url = it.assets["data"].href
                     registrar_log(f"   • Procesando tesela {idx+1}/{len(items)}: {it.id}")
                     
                     src = rasterio.open(url)
+                    # Resolución ajustada a 5 metros para garantizar velocidad y estabilidad de memoria
                     transform, width, height = rasterio.warp.calculate_default_transform(
-                        src.crs, f"EPSG:{epsg_utm}", src.width, src.height, *src.bounds, resolution=2.5
+                        src.crs, f"EPSG:{epsg_utm}", src.width, src.height, *src.bounds, resolution=5.0
                     )
                     
                     kwargs = src.meta.copy()
@@ -218,9 +218,9 @@ if st.button("🚀 PROCESAR Y DESCARGAR DEM 2.5M (.tif)", type="primary"):
 
                 cropped_arr = mosaic_arr[:, row_start:row_end, col_start:col_end]
                 cropped_trans = rasterio.transform.xy(mosaic_trans, row_start, col_start, offset='ul')
-                final_transform = rasterio.transform.Affine(2.5, 0.0, cropped_trans[0], 0.0, -2.5, cropped_trans[1])
+                final_transform = rasterio.transform.Affine(5.0, 0.0, cropped_trans[0], 0.0, -5.0, cropped_trans[1])
 
-                output_file = os.path.join(temp_dir, "DEM_Real_2.5m_Syntro.tif")
+                output_file = os.path.join(temp_dir, "DEM_Optimizad_5m_Syntro.tif")
                 
                 profile = open_datasets[0].profile.copy() if 'open_datasets' in locals() else {}
                 profile.update({
@@ -238,7 +238,7 @@ if st.button("🚀 PROCESAR Y DESCARGAR DEM 2.5M (.tif)", type="primary"):
                     dst.write(cropped_arr)
 
             progress_bar.progress(85)
-            registrar_log("Calculando estadísticas limpias del DEM de alta resolución...")
+            registrar_log("Calculando estadísticas limpias del DEM...")
 
             with rasterio.open(output_file) as src:
                 out_image = src.read(1)
@@ -287,15 +287,15 @@ if st.button("🚀 PROCESAR Y DESCARGAR DEM 2.5M (.tif)", type="primary"):
             with open(qml_path, "w", encoding="utf-8") as f_qml:
                 f_qml.write(qml_content)
 
-            zip_output = os.path.join(temp_dir, "DEM_Real_2.5m_Syntro.zip")
+            zip_output = os.path.join(temp_dir, "DEM_Optimizad_5m_Syntro.zip")
             with zipfile.ZipFile(zip_output, "w", zipfile.ZIP_DEFLATED) as zf:
-                zf.write(output_file, arcname="DEM_Real_2.5m_Syntro.tif")
-                zf.write(qml_path, arcname="DEM_Real_2.5m_Syntro.qml")
+                zf.write(output_file, arcname="DEM_Optimizad_5m_Syntro.tif")
+                zf.write(qml_path, arcname="DEM_Optimizad_5m_Syntro.qml")
 
             elapsed_time = round(time.time() - start_time, 2)
             progress_bar.progress(100)
             status_label.text(f"⏱ ¡Completado en {elapsed_time}s!")
-            st.success("¡DEM procesado con éxito sin restricciones de disco!")
+            st.success("¡DEM procesado con éxito y de forma inmediata!")
 
             col1, col2, col3 = st.columns(3)
             col1.metric("Elev. Mínima", f"{min_elev:.2f} m")
@@ -306,7 +306,7 @@ if st.button("🚀 PROCESAR Y DESCARGAR DEM 2.5M (.tif)", type="primary"):
                 st.download_button(
                     "📦 Descargar DEM + Estilo de Color (.zip)",
                     f_zip,
-                    file_name="DEM_Real_2.5m_Syntro.zip",
+                    file_name="DEM_Optimizad_5m_Syntro.zip",
                     mime="application/zip",
                     use_container_width=True
                 )
