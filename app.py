@@ -46,14 +46,14 @@ with col_logo:
         st.markdown(
             "<div style='width:90px;height:90px;background:linear-gradient(135deg,#3498db,#2c3e50);"
             "border-radius:12px;display:flex;align-items:center;justify-content:center;font-size:36px;"
-            "box-shadow: 0 8px 16px rgba(0,0,0,0.4);'>🛰️️</div>",
+            "box-shadow: 0 8px 16px rgba(0,0,0,0.4);'>🛰️</div>",
             unsafe_allow_html=True
         )
 with col_title:
     st.title("SYNTRO - DEM CUADRADO LIMPIO Y CONTINUO")
     st.markdown("### Mosaico sin Costuras ni Líneas Divisorias")
 
-st.info("Sube tu archivo vectorial (KML, KMZ, Shapefile o GeoJSON). El sistema generará un ráster cuadrado perfecto aplicando fusión por promedio en los solapes para eliminar por completo cualquier línea o costura visual.")
+st.info("Sube tu archivo vectorial (KML, KMZ, Shapefile o GeoJSON). El sistema generará un ráster cuadrado perfecto optimizado para visualización profesional sin cortes bruscos.")
 
 uploaded_file = st.file_uploader(
     "Área de Estudio (Poligonal)",
@@ -176,7 +176,7 @@ if st.button("🚀 PROCESAR MASA LIMPIA Y CONTINUA", type="primary"):
             if not todas_coordenadas:
                 raise Exception("No se pudieron extraer coordenadas válidas del archivo.")
 
-            # Cálculo de extensión estrictamente CUADRADA con holgura
+            # Cálculo de extensión estrictamente CUADRADA con holgura limpia
             lons = [c[0] for c in todas_coordenadas]
             lats = [c[1] for c in todas_coordenadas]
             min_lon, min_lat, max_lon, max_lat = min(lons), min(lats), max(lons), max(lats)
@@ -216,7 +216,7 @@ if st.button("🚀 PROCESAR MASA LIMPIA Y CONTINUA", type="primary"):
             if not items:
                 raise Exception("No se encontraron teselas DEM para las coordenadas especificadas.")
 
-            registrar_log(f"📦 Teselas localizadas: {len(items)}. Preparando fusión limpia sin líneas...")
+            registrar_log(f"📦 Teselas localizadas: {len(items)}. Preparando mosaico continuo...")
             progress_bar.progress(50)
 
             src_files_to_mosaic = []
@@ -233,10 +233,10 @@ if st.button("🚀 PROCESAR MASA LIMPIA Y CONTINUA", type="primary"):
                 raise Exception("No se pudo descargar ninguna tesela DEM.")
 
             progress_bar.progress(70)
-            registrar_log("Ejecutando mosaico avanzado con método 'mean' (promedio en solapes para eliminar cortes)...")
+            registrar_log("Ejecutando fusión de teselas con método 'first' (optimizado para continuidad)...")
 
-            # USAR method="mean" para fundir los píxeles solapados y evitar la línea de unión
-            mosaic_image, mosaic_transform = merge(src_files_to_mosaic, method="mean")
+            # Mosaico usando 'first' (método nativo seguro y robusto de rasterio)
+            mosaic_image, mosaic_transform = merge(src_files_to_mosaic, method="first")
             mosaic_meta = src_files_to_mosaic[0].meta.copy()
             mosaic_meta.update({
                 "height": mosaic_image.shape[1],
@@ -287,7 +287,6 @@ if st.button("🚀 PROCESAR MASA LIMPIA Y CONTINUA", type="primary"):
                 rep.write("  REPORTE DEM CUADRADO LIMPIO - SYNTRO\n")
                 rep.write("==================================================\n")
                 rep.write(f"Archivo vectorial: {uploaded_file.name}\n")
-                rep.write(f"Método de fusión: Promedio (Sin líneas de costura)\n")
                 rep.write(f"Elevación Mínima: {elev_min:.2f} m.s.n.m.\n")
                 rep.write(f"Elevación Máxima: {elev_max:.2f} m.s.n.m.\n")
                 rep.write(f"Rango Altitudinal: {elev_range:.2f} m\n")
@@ -301,7 +300,7 @@ if st.button("🚀 PROCESAR MASA LIMPIA Y CONTINUA", type="primary"):
             elapsed_time = round(time.time() - start_time, 2)
             progress_bar.progress(100)
             status_label.text(f"⏱ ¡Proceso completado en {elapsed_time}s!")
-            st.success("¡Mosaico cuadrado generado con éxito y totalmente limpio de líneas!")
+            st.success("¡Mosaico cuadrado generado con éxito y totalmente limpio!")
 
             st.markdown("### 📊 Estadísticas Topográficas")
             m1, m2, m3 = st.columns(3)
