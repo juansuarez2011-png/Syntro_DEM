@@ -15,7 +15,7 @@ import requests
 import pystac_client
 import planetary_computer
 
-st.set_page_config(page_title="Syntro Academy - Descargador DEM Dinámico Global", page_icon="🛰️️", layout="centered")
+st.set_page_config(page_title="Syntro Academy - Descargador DEM Dinámico Global", page_icon="🛰️", layout="centered")
 
 st.markdown("""
     <style>
@@ -233,15 +233,16 @@ if st.button("🚀 PROCESAR POLIGONAL Y EXTRAER DEM", type="primary"):
             progress_bar.progress(75)
             registrar_log("Aplicando máscara geométrica exacta sobre la poligonal...")
 
-            # RECORTE EXACTO PIXELES ADENTRO DE LA POLIGONAL
+            # RECORTE EXACTO PIXELES ADENTRO DE LA POLIGONAL CON NODATA EN NAN
             with rasterio.open(raw_dem_file) as src:
-                out_image, out_transform = mask(src, geometrias_geojson, crop=True)
+                out_image, out_transform = mask(src, geometrias_geojson, crop=True, nodata=np.nan)
                 out_meta = src.meta.copy()
                 
                 out_meta.update({
                     "height": out_image.shape[1],
                     "width": out_image.shape[2],
-                    "transform": out_transform
+                    "transform": out_transform,
+                    "nodata": np.nan
                 })
                 
                 clipped_dem_path = os.path.join(temp_dir, "DEM_Syntro_Recortado.tif")
@@ -249,14 +250,12 @@ if st.button("🚀 PROCESAR POLIGONAL Y EXTRAER DEM", type="primary"):
                     dest.write(out_image)
 
                 dem_array = out_image[0]
-                nodata = src.nodatavals[0]
 
             progress_bar.progress(90)
             registrar_log("Calculando estadísticas altitudinales estrictas dentro del área...")
 
-            valid_pixels = dem_array[dem_array > -1000]
-            if nodata is not None:
-                valid_pixels = valid_pixels[valid_pixels != nodata]
+            # Filtrar estrictamente solo valores finitos dentro del polígono (excluyendo el fondo NaN)
+            valid_pixels = dem_array[np.isfinite(dem_array)]
 
             if valid_pixels.size > 0:
                 elev_min = float(np.min(valid_pixels))
@@ -265,7 +264,7 @@ if st.button("🚀 PROCESAR POLIGONAL Y EXTRAER DEM", type="primary"):
             else:
                 elev_min, elev_max, elev_range = 0.0, 0.0, 0.0
 
-            registrar_log(f"Estadísticas Finales -> Mín: {elev_min:.2f} m | Máx: {elev_max:.2f} m | Rango: {elev_range:.2f} m")
+            registrar_log(f"Estadísticas Reales -> Mín: {elev_min:.2f} m | Máx: {elev_max:.2f} m | Rango: {elev_range:.2f} m")
 
             # Generar reporte de texto
             report_path = os.path.join(temp_dir, "reporte_estadisticas_dem.txt")
