@@ -8,15 +8,18 @@ import json
 import xml.etree.ElementTree as ET
 import shapefile
 import rasterio
-from rasterio.windows import from_bounds
-from rasterio.merge import merge
 import numpy as np
-from shapely.geometry import Polygon
 import requests
 import pystac_client
 import planetary_computer
+from osgeo import gdal
+from pyproj import Transformer
 
-st.set_page_config(page_title="Syntro Academy - Descargador DEM Cuadrado Global", page_icon="🛰️", layout="centered")
+st.set_page_config(
+    title="Syntro Academy - Descargador DEM 2.5m (Píxel Fino)", 
+    page_icon="🛰️", 
+    layout="wide"
+)
 
 st.markdown("""
     <style>
@@ -24,12 +27,15 @@ st.markdown("""
     .stApp { background-color: #1e1e24; }
     h1, h2, h3 { color: #3498db !important; }
     div.stButton > button:first-child {
-        background: linear-gradient(135deg, #3498db, #2980b9);
+        background: linear-gradient(135deg, #2ecc71, #27ae60);
         color: white;
         border: none;
         border-radius: 8px;
         box-shadow: 0 4px 6px rgba(0,0,0,0.3), 0 1px 3px rgba(0,0,0,0.2);
         transition: all 0.2s ease;
+        font-weight: bold;
+        font-size: 15px;
+        padding: 10px 20px;
     }
     div.stButton > button:first-child:hover {
         transform: translateY(-2px);
@@ -38,22 +44,22 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-col_logo, col_title = st.columns([1, 4])
+col_logo, col_title = st.columns([1, 5])
 with col_logo:
     if os.path.exists("logo.png"):
-        st.image("logo.png", width=90)
+        st.image("logo.png", width=95)
     else:
         st.markdown(
-            "<div style='width:90px;height:90px;background:linear-gradient(135deg,#3498db,#2c3e50);"
-            "border-radius:12px;display:flex;align-items:center;justify-content:center;font-size:36px;"
+            "<div style='width:95px;height:95px;background:linear-gradient(135deg,#3498db,#2c3e50);"
+            "border-radius:12px;display:flex;align-items:center;justify-content:center;font-size:40px;"
             "box-shadow: 0 8px 16px rgba(0,0,0,0.4);'>🛰️</div>",
             unsafe_allow_html=True
         )
 with col_title:
-    st.title("SYNTRO - DEM CUADRADO LIMPIO Y CONTINUO")
-    st.markdown("### Mosaico sin Costuras ni Líneas Divisorias")
+    st.title("SYNTRO - MOTOR DEM DE 2.5M (PYTHON & GDAL)")
+    st.markdown("### Procesamiento Avanzado con Cálculo Automático de Zona UTM y Remuestreo Fino")
 
-st.info("Sube tu archivo vectorial (KML, KMZ, Shapefile o GeoJSON). El sistema generará un ráster cuadrado perfecto optimizado para visualización profesional sin cortes bruscos.")
+st.info("Sube tu archivo vectorial (SHP en ZIP, KML, KMZ o GeoJSON). El motor conectará con Microsoft Planetary Computer, calculará la zona UTM correspondiente, aplicará un búfer del 2% y reescalará mediante GDAL Warp a un píxel continuo de 2.5m.")
 
 uploaded_file = st.file_uploader(
     "Área de Estudio (Poligonal)",
@@ -68,7 +74,7 @@ logs_history = []
 def registrar_log(mensaje):
     timestamp = time.strftime('%H:%M:%S')
     logs_history.append(f"[{timestamp}] {mensaje}")
-    log_container.text_area("Registro de Actividad (Log):", "\n".join(logs_history), height=160)
+    log_container.text_area("Registro de Actividad (Log):", "\n".join(logs_history), height=180)
 
 def extraer_coordenadas_de_geometria(geom_dict):
     coords = []
@@ -91,7 +97,7 @@ def extraer_coordenadas_de_geometria(geom_dict):
             coords.append((pt[0], pt[1]))
     return coords
 
-if st.button("🚀 PROCESAR MASA LIMPIA Y CONTINUA", type="primary"):
+if st.button("🚀 INICIAR PROCESO DEM 2.5M", type="primary"):
     if uploaded_file:
         logs_history.clear()
         start_time = time.time()
@@ -176,30 +182,23 @@ if st.button("🚀 PROCESAR MASA LIMPIA Y CONTINUA", type="primary"):
             if not todas_coordenadas:
                 raise Exception("No se pudieron extraer coordenadas válidas del archivo.")
 
-            # Cálculo de extensión estrictamente CUADRADA con holgura limpia
+            # Cálculo de extensión WGS84
             lons = [c[0] for c in todas_coordenadas]
             lats = [c[1] for c in todas_coordenadas]
-            min_lon, min_lat, max_lon, max_lat = min(lons), min(lats), max(lons), max(lats)
+            west, south, east, north = min(lons), min(lats), max(lons), max(lats)
 
-            width_deg = max_lon - min_lon
-            height_deg = max_lat - min_lat
-            max_dim = max(width_deg, height_deg)
+            center_lon = (west + east) / 2.0
+            center_lat = (south + north) / 2.0
             
-            buffer_deg = max_dim * 0.15
-            side = max_dim + (buffer_deg * 2)
+            # Cálculo automático de Zona UTM (replicando lógica de QGIS)[cite: 13]
+            utm_zone = int((center_lon + 180) / 6) + 1
+            hemisphere = "north" if center_lat >= 0 else "south"
+            epsg_utm = 32600 + utm_zone if hemisphere == "north" else 32700 + utm_zone
 
-            center_lon = (min_lon + max_lon) / 2
-            center_lat = (min_lat + max_lat) / 2
-
-            west = center_lon - (side / 2)
-            east = center_lon + (side / 2)
-            south = center_lat - (side / 2)
-            north = center_lat + (side / 2)
-
-            registrar_log(f"Cuadrado calculado -> Oeste: {west:.4f}, Sur: {south:.4f}, Este: {east:.4f}, Norte: {north:.4f}")
+            registrar_log(f"Zona UTM calculada: EPSG:{epsg_utm} ({utm_zone}{'N' if hemisphere == 'north' else 'S'})")
             progress_bar.progress(30)
 
-            # Conexión STAC Planetary Computer
+            # Conexión STAC Planetary Computer[cite: 13]
             registrar_log("Conectando con Microsoft Planetary Computer (Copernicus DEM 30m)...")
             catalog = pystac_client.Client.open(
                 "https://planetarycomputer.microsoft.com/api/stac/v1",
@@ -208,99 +207,85 @@ if st.button("🚀 PROCESAR MASA LIMPIA Y CONTINUA", type="primary"):
 
             search = catalog.search(
                 collections=["cop-dem-glo-30"],
-                bbox=[west, south, east, north],
-                limit=15
+                bbox=[west, south, east, north]
             )
 
             items = list(search.item_collection())
             if not items:
-                raise Exception("No se encontraron teselas DEM para las coordenadas especificadas.")
+                raise Exception("No se encontraron teselas de elevación para la extensión geográfica indicada.")
 
-            registrar_log(f"📦 Teselas localizadas: {len(items)}. Preparando mosaico continuo...")
+            registrar_log(f"Se encontraron {len(items)} teselas DEM. Preparando reescalado a 2.5m...")
             progress_bar.progress(50)
 
-            src_files_to_mosaic = []
-            for idx, item in enumerate(items):
-                url = item.assets["data"].href
-                resp = requests.get(url, timeout=60)
-                if resp.status_code == 200:
-                    tile_path = os.path.join(temp_dir, f"tile_{idx}.tif")
-                    with open(tile_path, "wb") as tf:
-                        tf.write(resp.content)
-                    src_files_to_mosaic.append(rasterio.open(tile_path))
+            input_urls = [item.assets["data"].href for item in items]
+            output_dem_file = os.path.join(temp_dir, "DEM_Real_2.5m_Syntro.tif")
 
-            if not src_files_to_mosaic:
-                raise Exception("No se pudo descargar ninguna tesela DEM.")
+            # Transformación de límites a UTM y aplicación de búfer del 2%[cite: 13]
+            transformer = Transformer.from_crs("EPSG:4326", f"EPSG:{epsg_utm}", always_xy=True)
+            xmin_utm, ymin_utm = transformer.transform(west, south)
+            xmax_utm, ymax_utm = transformer.transform(east, north)
+
+            x_buf = (xmax_utm - xmin_utm) * 0.02
+            y_buf = (ymax_utm - ymin_utm) * 0.02
+
+            xmin = xmin_utm - x_buf
+            xmax = xmax_utm + x_buf
+            ymin = ymin_utm - y_buf
+            ymax = ymax_utm + y_buf
 
             progress_bar.progress(70)
-            registrar_log("Ejecutando fusión de teselas con método 'first' (optimizado para continuidad)...")
+            registrar_log("Ejecutando GDAL Warp (resolución de píxel: 2.5m con interpolación bilineal)...")
 
-            # Mosaico usando 'first' (método nativo seguro y robusto de rasterio)
-            mosaic_image, mosaic_transform = merge(src_files_to_mosaic, method="first")
-            mosaic_meta = src_files_to_mosaic[0].meta.copy()
-            mosaic_meta.update({
-                "height": mosaic_image.shape[1],
-                "width": mosaic_image.shape[2],
-                "transform": mosaic_transform,
-                "driver": "GTiff"
-            })
+            warp_options = gdal.WarpOptions(
+                format='GTiff',
+                dstSRS=f"EPSG:{epsg_utm}",
+                xRes=2.5,
+                yRes=2.5,
+                resampleAlg=gdal.GRA_Bilinear,
+                outputBounds=[xmin, ymin, xmax, ymax],
+                warpMemoryLimit=512 * 1024 * 1024,
+                multithread=True,
+                creationOptions=["COMPRESS=DEFLATE", "TILED=YES"]
+            )
 
-            raw_mosaic_file = os.path.join(temp_dir, "raw_mosaic.tif")
-            with rasterio.open(raw_mosaic_file, "w", **mosaic_meta) as dest:
-                dest.write(mosaic_image)
+            result_ds = gdal.Warp(output_dem_file, input_urls, options=warp_options)
+            if result_ds is None:
+                raise Exception("Falló la ejecución de gdal.Warp para generar el DEM de 2.5m.")
+            result_ds = None
 
-            for sf_obj in src_files_to_mosaic:
-                sf_obj.close()
+            progress_bar.progress(90)
+            registrar_log(f"Archivo generado correctamente: {output_dem_file}")
 
-            progress_bar.progress(85)
-            registrar_log("Generando recorte cuadrado definitivo...")
-
-            with rasterio.open(raw_mosaic_file) as src:
-                window = from_bounds(west, south, east, north, src.transform)
-                window = window.round_offsets().round_shape()
-                
-                square_image = src.read(window=window)
-                square_transform = rasterio.windows.transform(window, src.transform)
-                
-                square_meta = src.meta.copy()
-                square_meta.update({
-                    "height": square_image.shape[1],
-                    "width": square_image.shape[2],
-                    "transform": square_transform
-                })
-                
-                square_dem_path = os.path.join(temp_dir, "DEM_Cuadrado_Limpio.tif")
-                with rasterio.open(square_dem_path, "w", **square_meta) as dest:
-                    dest.write(square_image)
-
-                valid_pixels = square_image[np.isfinite(square_image)]
+            # Lectura de estadísticas topográficas
+            with rasterio.open(output_dem_file) as src:
+                arr = src.read(1)
+                valid_pixels = arr[np.isfinite(arr) & (arr != src.nodata)]
                 elev_min = float(np.min(valid_pixels)) if valid_pixels.size > 0 else 0.0
                 elev_max = float(np.max(valid_pixels)) if valid_pixels.size > 0 else 0.0
                 elev_range = elev_max - elev_min
 
-            progress_bar.progress(95)
-            registrar_log(f"Rango altitudinal -> Mín: {elev_min:.2f} m | Máx: {elev_max:.2f} m")
-
-            report_path = os.path.join(temp_dir, "reporte_dem_limpio.txt")
+            report_path = os.path.join(temp_dir, "reporte_dem_2.5m.txt")
             with open(report_path, "w", encoding="utf-8") as rep:
                 rep.write("==================================================\n")
-                rep.write("  REPORTE DEM CUADRADO LIMPIO - SYNTRO\n")
+                rep.write("  REPORTE DEM 2.5M - SYNTRO ACADEMY\n")
                 rep.write("==================================================\n")
                 rep.write(f"Archivo vectorial: {uploaded_file.name}\n")
+                rep.write(f"Proyección CRS: EPSG:{epsg_utm}\n")
+                rep.write(f"Resolución espacial: 2.5 m x 2.5 m\n")
                 rep.write(f"Elevación Mínima: {elev_min:.2f} m.s.n.m.\n")
                 rep.write(f"Elevación Máxima: {elev_max:.2f} m.s.n.m.\n")
                 rep.write(f"Rango Altitudinal: {elev_range:.2f} m\n")
                 rep.write("==================================================\n")
 
-            zip_output = os.path.join(temp_dir, "DEM_Syntro_Cuadrado_Limpio.zip")
+            zip_output = os.path.join(temp_dir, "DEM_Syntro_2.5m.zip")
             with zipfile.ZipFile(zip_output, "w", zipfile.ZIP_DEFLATED) as zf:
-                zf.write(square_dem_path, arcname="DEM_Cuadrado_Limpio.tif")
-                zf.write(report_path, arcname="reporte_dem_limpio.txt")
+                zf.write(output_dem_file, arcname="DEM_Real_2.5m_Syntro.tif")
+                zf.write(report_path, arcname="reporte_dem_2.5m.txt")
 
             elapsed_time = round(time.time() - start_time, 2)
             progress_bar.progress(100)
             status_label.text(f"⏱ ¡Proceso completado en {elapsed_time}s!")
-            st.success("¡Mosaico cuadrado generado con éxito y totalmente limpio!")
+            st.success("¡DEM de alta resolución (2.5m) generado con éxito!")
 
             st.markdown("### 📊 Estadísticas Topográficas")
             m1, m2, m3 = st.columns(3)
@@ -314,9 +299,9 @@ if st.button("🚀 PROCESAR MASA LIMPIA Y CONTINUA", type="primary"):
             st.write("")
             with open(zip_output, "rb") as f_zip:
                 st.download_button(
-                    "📦 Descargar Paquete (.zip con DEM Limpio y Reporte)",
+                    "📦 Descargar Paquete (.zip con DEM 2.5m y Reporte)",
                     f_zip,
-                    file_name="DEM_Syntro_Cuadrado_Limpio.zip",
+                    file_name="DEM_Syntro_2.5m.zip",
                     mime="application/zip",
                     use_container_width=True
                 )
