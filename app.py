@@ -8,11 +8,12 @@ import json
 import xml.etree.ElementTree as ET
 import shapefile
 import rasterio
+from rasterio.warp import calculate_default_transform, reproject, Resampling
+from rasterio.merge import merge
 import numpy as np
 import requests
 import pystac_client
 import planetary_computer
-from osgeo import gdal
 from pyproj import Transformer
 
 st.set_page_config(
@@ -56,10 +57,10 @@ with col_logo:
             unsafe_allow_html=True
         )
 with col_title:
-    st.title("SYNTRO - MOTOR DEM DE 2.5M (PYTHON & GDAL)")
+    st.title("SYNTRO - MOTOR DEM DE 2.5M (PYTHON & RASTERIO)")
     st.markdown("### Procesamiento Avanzado con Cálculo Automático de Zona UTM y Remuestreo Fino")
 
-st.info("Sube tu archivo vectorial (SHP en ZIP, KML, KMZ o GeoJSON). El motor conectará con Microsoft Planetary Computer, calculará la zona UTM correspondiente, aplicará un búfer del 2% y reescalará mediante GDAL Warp a un píxel continuo de 2.5m.")
+st.info("Sube tu archivo vectorial (SHP en ZIP, KML, KMZ o GeoJSON). El motor conectará con Microsoft Planetary Computer, calculará la zona UTM óptima, aplicará un búfer y reescalará a un píxel continuo de 2.5m.")
 
 uploaded_file = st.file_uploader(
     "Área de Estudio (Poligonal)",
@@ -190,7 +191,7 @@ if st.button("🚀 INICIAR PROCESO DEM 2.5M", type="primary"):
             center_lon = (west + east) / 2.0
             center_lat = (south + north) / 2.0
             
-            # Cálculo automático de Zona UTM (replicando lógica de QGIS)[cite: 13]
+            # Cálculo automático de Zona UTM
             utm_zone = int((center_lon + 180) / 6) + 1
             hemisphere = "north" if center_lat >= 0 else "south"
             epsg_utm = 32600 + utm_zone if hemisphere == "north" else 32700 + utm_zone
@@ -198,7 +199,7 @@ if st.button("🚀 INICIAR PROCESO DEM 2.5M", type="primary"):
             registrar_log(f"Zona UTM calculada: EPSG:{epsg_utm} ({utm_zone}{'N' if hemisphere == 'north' else 'S'})")
             progress_bar.progress(30)
 
-            # Conexión STAC Planetary Computer[cite: 13]
+            # Conexión STAC Planetary Computer
             registrar_log("Conectando con Microsoft Planetary Computer (Copernicus DEM 30m)...")
             catalog = pystac_client.Client.open(
                 "https://planetarycomputer.microsoft.com/api/stac/v1",
@@ -214,44 +215,86 @@ if st.button("🚀 INICIAR PROCESO DEM 2.5M", type="primary"):
             if not items:
                 raise Exception("No se encontraron teselas de elevación para la extensión geográfica indicada.")
 
-            registrar_log(f"Se encontraron {len(items)} teselas DEM. Preparando reescalado a 2.5m...")
-            progress_bar.progress(50)
+            registrar_log(f"Se encontraron {len(items)} teselas DEM. Descargando...")
+            progress_bar.progress(45)
 
-            input_urls = [item.assets["data"].href for item in items]
+            src_files_to_mosaic = []
+            for idx, item in enumerate(items):
+                url = item.assets["data"].href
+                resp = requests.get(url, timeout=60)
+                if resp.status_code == 200:
+                    tile_path = os.path.join(temp_dir, f"tile_{idx}.tif")
+                    with open(tile_path, "wb") as tf:
+                        tf.write(resp.content)
+                    src_files_to_mosaic.append(rasterio.open(tile_path))
+
+            if not src_files_to_mosaic:
+                raise Exception("No se pudo descargar ninguna tesela DEM.")
+
+            progress_bar.progress(60)
+            registrar_log("Fusionando teselas base...")
+
+            mosaic_image, mosaic_transform = merge(src_files_to_mosaic, method="first")
+            mosaic_meta = src_files_to_mosaic[0].meta.copy()
+            mosaic_meta.update({
+                "height": mosaic_image.shape[1],
+                "width": mosaic_image.shape[2],
+                "transform": mosaic_transform
+            })
+
+            temp_mosaic_path = os.path.join(temp_dir, "mosaic_wgs84.tif")
+            with rasterio.open(temp_mosaic_path, "w", **mosaic_meta) as dest:
+                dest.write(mosaic_image)
+
+            for sf_obj in src_files_to_mosaic:
+                sf_obj.close()
+
+            progress_bar.progress(75)
+            registrar_log("Reescalando y proyectando a 2.5m (Rasterio Warp)...")
+
+            dst_crs = f"EPSG:{epsg_utm}"
             output_dem_file = os.path.join(temp_dir, "DEM_Real_2.5m_Syntro.tif")
 
-            # Transformación de límites a UTM y aplicación de búfer del 2%[cite: 13]
-            transformer = Transformer.from_crs("EPSG:4326", f"EPSG:{epsg_utm}", always_xy=True)
-            xmin_utm, ymin_utm = transformer.transform(west, south)
-            xmax_utm, ymax_utm = transformer.transform(east, north)
+            with rasterio.open(temp_mosaic_path) as src:
+                # Transformación y cálculo de límites UTM con 2% de búfer
+                transformer = Transformer.from_crs("EPSG:4326", dst_crs, always_xy=True)
+                xmin_utm, ymin_utm = transformer.transform(west, south)
+                xmax_utm, ymax_utm = transformer.transform(east, north)
 
-            x_buf = (xmax_utm - xmin_utm) * 0.02
-            y_buf = (ymax_utm - ymin_utm) * 0.02
+                x_buf = (xmax_utm - xmin_utm) * 0.02
+                y_buf = (ymax_utm - ymin_utm) * 0.02
 
-            xmin = xmin_utm - x_buf
-            xmax = xmax_utm + x_buf
-            ymin = ymin_utm - y_buf
-            ymax = ymax_utm + y_buf
+                xmin = xmin_utm - x_buf
+                xmax = xmax_utm + x_buf
+                ymin = ymin_utm - y_buf
+                ymax = ymax_utm + y_buf
 
-            progress_bar.progress(70)
-            registrar_log("Ejecutando GDAL Warp (resolución de píxel: 2.5m con interpolación bilineal)...")
+                # Cálculo de dimensiones para resolución exacta de 2.5m
+                width = int(np.ceil((xmax - xmin) / 2.5))
+                height = int(np.ceil((ymax - ymin) / 2.5))
 
-            warp_options = gdal.WarpOptions(
-                format='GTiff',
-                dstSRS=f"EPSG:{epsg_utm}",
-                xRes=2.5,
-                yRes=2.5,
-                resampleAlg=gdal.GRA_Bilinear,
-                outputBounds=[xmin, ymin, xmax, ymax],
-                warpMemoryLimit=512 * 1024 * 1024,
-                multithread=True,
-                creationOptions=["COMPRESS=DEFLATE", "TILED=YES"]
-            )
+                dst_transform = rasterio.transform.from_bounds(xmin, ymin, xmax, ymax, width, height)
 
-            result_ds = gdal.Warp(output_dem_file, input_urls, options=warp_options)
-            if result_ds is None:
-                raise Exception("Falló la ejecución de gdal.Warp para generar el DEM de 2.5m.")
-            result_ds = None
+                dst_meta = src.meta.copy()
+                dst_meta.update({
+                    "crs": dst_crs,
+                    "transform": dst_transform,
+                    "width": width,
+                    "height": height,
+                    "compress": "deflate",
+                    "tiled": True
+                })
+
+                with rasterio.open(output_dem_file, "w", **dst_meta) as dst:
+                    reproject(
+                        source=rasterio.band(src, 1),
+                        destination=rasterio.band(dst, 1),
+                        src_transform=src.transform,
+                        src_crs=src.crs,
+                        dst_transform=dst_transform,
+                        dst_crs=dst_crs,
+                        resampling=Resampling.bilinear
+                    )
 
             progress_bar.progress(90)
             registrar_log(f"Archivo generado correctamente: {output_dem_file}")
@@ -270,7 +313,7 @@ if st.button("🚀 INICIAR PROCESO DEM 2.5M", type="primary"):
                 rep.write("  REPORTE DEM 2.5M - SYNTRO ACADEMY\n")
                 rep.write("==================================================\n")
                 rep.write(f"Archivo vectorial: {uploaded_file.name}\n")
-                rep.write(f"Proyección CRS: EPSG:{epsg_utm}\n")
+                rep.write(f"Proyección CRS: {dst_crs}\n")
                 rep.write(f"Resolución espacial: 2.5 m x 2.5 m\n")
                 rep.write(f"Elevación Mínima: {elev_min:.2f} m.s.n.m.\n")
                 rep.write(f"Elevación Máxima: {elev_max:.2f} m.s.n.m.\n")
