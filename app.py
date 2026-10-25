@@ -15,10 +15,13 @@ import requests
 import pystac_client
 import planetary_computer
 from pyproj import Transformer, CRS
+import geopandas as gpd
+import shapely.geometry
+import re
 
 st.set_page_config(
     page_title="Syntro Academy - Descargador DEM 2.5m (Píxel Fino)", 
-    page_icon="🛰️️", 
+    page_icon="🛰", 
     layout="wide"
 )
 
@@ -58,9 +61,9 @@ with col_logo:
         )
 with col_title:
     st.title("SYNTRO - MOTOR DEM DE 2.5M (PYTHON & RASTERIO)")
-    st.markdown("### Procesamiento Avanzado con Cálculo Automático de Zona UTM y Remuestreo Fino")
+    st.markdown("### Procesamiento Avanzado con Detección Automática de CRS y Remuestreo Fino")
 
-st.info("Sube tu archivo vectorial (SHP en ZIP, KML, KMZ o GeoJSON). El motor conectará con Microsoft Planetary Computer, calculará la zona UTM óptima, aplicará un búfer y reescalará a un píxel continuo de 2.5m.")
+st.info("Sube tu archivo vectorial (SHP en ZIP, KML, KMZ, GeoJSON o JSON). El motor detectará automáticamente el sistema de coordenadas (CRS), incluso si está en metros UTM, consultará Microsoft Planetary Computer y reescalará a un píxel continuo de 2.5m.")
 
 uploaded_file = st.file_uploader(
     "Área de Estudio (Poligonal)",
@@ -77,34 +80,13 @@ def registrar_log(mensaje):
     logs_history.append(f"[{timestamp}] {mensaje}")
     log_container.text_area("Registro de Actividad (Log):", "\n".join(logs_history), height=180)
 
-def extraer_coordenadas_de_geometria(geom_dict):
-    coords = []
-    g_type = geom_dict.get("type")
-    g_coords = geom_dict.get("coordinates", [])
-
-    if g_type == "Polygon":
-        for ring in g_coords:
-            for pt in ring:
-                coords.append((pt[0], pt[1]))
-    elif g_type == "MultiPolygon":
-        for poly in g_coords:
-            for ring in poly:
-                for pt in ring:
-                    coords.append((pt[0], pt[1]))
-    elif g_type == "Point":
-        coords.append((g_coords[0], g_coords[1]))
-    elif g_type == "LineString":
-        for pt in g_coords:
-            coords.append((pt[0], pt[1]))
-    return coords
-
 if st.button("🚀 INICIAR PROCESO DEM 2.5M", type="primary"):
     if uploaded_file:
         logs_history.clear()
         start_time = time.time()
 
         progress_bar.progress(10)
-        status_label.text("⏱ Analizando geometría y extrayendo vértices...")
+        status_label.text("⏱ Analizando geometría y detectando CRS...")
         registrar_log(f"Archivo recibido: {uploaded_file.name}")
 
         temp_dir = tempfile.mkdtemp()
@@ -116,71 +98,30 @@ if st.button("🚀 INICIAR PROCESO DEM 2.5M", type="primary"):
             with open(input_path, "wb") as f:
                 f.write(uploaded_file.getbuffer())
 
-            todas_coordenadas = []
-            shapefile_crs = "EPSG:4326"
+            gdf = None
 
-            # 1. GeoJSON / JSON
-            if file_extension in ['geojson', 'json']:
-                registrar_log("Leyendo formato GeoJSON...")
-                with open(input_path, 'r', encoding='utf-8') as jf:
-                    data = json.load(jf)
-                
-                features = data.get("features", [data] if "geometry" in data else [])
-                for feat in features:
-                    geom = feat.get("geometry") if "geometry" in feat else feat
-                    if geom:
-                        coords_geom = extraer_coordenadas_de_geometria(geom)
-                        todas_coordenadas.extend(coords_geom)
-
-            # 2. Shapefile (.zip)
-            elif file_extension == 'zip':
-                registrar_log("Descomprimiendo Shapefile (.zip)...")
-                with zipfile.ZipFile(input_path, 'r') as zip_ref:
-                    zip_ref.extractall(temp_dir)
-                
-                shp_path = None
-                prj_path = None
-                for root, dirs, files in os.walk(temp_dir):
-                    for file in files:
-                        if file.endswith('.shp'):
-                            shp_path = os.path.join(root, file)
-                        elif file.endswith('.prj'):
-                            prj_path = os.path.join(root, file)
-
-                if not shp_path:
-                    raise Exception("No se encontró ningún archivo .shp dentro del archivo .zip.")
-                
-                if prj_path and os.path.exists(prj_path):
-                    with open(prj_path, 'r') as prj_file:
-                        prj_text = prj_file.read()
-                        try:
-                            parsed_crs = CRS.from_string(prj_text)
-                            shapefile_crs = parsed_crs
-                            registrar_log(f"CRS detectado en el Shapefile: {parsed_crs.name}")
-                        except Exception:
-                            registrar_log("No se pudo parsear el archivo .prj, asumiendo coordenadas geográficas o UTM estándar.")
-
-                registrar_log("Extrayendo puntos del Shapefile...")
-                sf = shapefile.Reader(shp_path)
-                
-                pts_originales = []
-                for shape_obj in sf.shapes():
-                    for pt in shape_obj.points:
-                        pts_originales.append((pt[0], pt[1]))
-
-                if not pts_originales:
-                    raise Exception("El Shapefile no contiene geometrías válidas.")
-
-                if shapefile_crs != "EPSG:4326":
-                    registrar_log("Reproyectando coordenadas del Shapefile a WGS84 (EPSG:4326)...")
-                    transformer_to_wgs84 = Transformer.from_crs(shapefile_crs, "EPSG:4326", always_xy=True)
-                    for x, y in pts_originales:
-                        lon, lat = transformer_to_wgs84.transform(x, y)
-                        todas_coordenadas.append((lon, lat))
+            # 1. GeoJSON / JSON / Zipped Shapefiles con GeoPandas
+            if file_extension in ['geojson', 'json', 'zip', 'gpkg']:
+                if file_extension == 'zip':
+                    registrar_log("Descomprimiendo archivo ZIP...")
+                    with zipfile.ZipFile(input_path, 'r') as zip_ref:
+                        zip_ref.extractall(temp_dir)
+                    
+                    shp_path = None
+                    for root, dirs, files in os.walk(temp_dir):
+                        for file in files:
+                            if file.endswith('.shp'):
+                                shp_path = os.path.join(root, file)
+                                break
+                    if not shp_path:
+                        raise Exception("No se encontró ningún archivo .shp dentro del archivo .zip.")
+                    registrar_log("Leyendo Shapefile con GeoPandas...")
+                    gdf = gpd.read_file(shp_path)
                 else:
-                    todas_coordenadas = pts_originales
+                    registrar_log(f"Leyendo formato {file_extension.upper()} con GeoPandas...")
+                    gdf = gpd.read_file(input_path)
 
-            # 3. KML / KMZ
+            # 2. KML / KMZ
             elif file_extension in ['kml', 'kmz']:
                 registrar_log(f"Procesando archivo {file_extension.upper()}...")
                 kml_content = None
@@ -194,37 +135,66 @@ if st.button("🚀 INICIAR PROCESO DEM 2.5M", type="primary"):
                         kml_content = kf.read()
 
                 root = ET.fromstring(kml_content)
+                polygons_coords = []
                 for elem in root.iter():
                     if elem.tag.endswith('coordinates') and elem.text:
                         coords_text = elem.text.strip()
+                        ring = []
                         for tuple_str in coords_text.split():
                             parts = tuple_str.split(',')
                             if len(parts) >= 2:
                                 try:
                                     lon, lat = float(parts[0]), float(parts[1])
-                                    todas_coordenadas.append((lon, lat))
+                                    ring.append((lon, lat))
                                 except ValueError:
                                     continue
+                        if len(ring) >= 3:
+                            polygons_coords.append(shapely.geometry.Polygon(ring))
+                if polygons_coords:
+                    poly_geom = shapely.geometry.MultiPolygon(polygons_coords) if len(polygons_coords) > 1 else polygons_coords[0]
+                    gdf = gpd.GeoDataFrame(geometry=[poly_geom], crs="EPSG:4326")
+                else:
+                    raise Exception("No se pudieron extraer coordenadas válidas del archivo KML/KMZ.")
             else:
                 raise Exception("Formato de archivo no soportado.")
 
-            if not todas_coordenadas:
-                raise Exception("No se pudieron extraer coordenadas válidas del archivo.")
+            if gdf is None or gdf.empty:
+                raise Exception("El archivo vectorial no contiene geometrías válidas.")
 
-            # Cálculo de extensión WGS84
-            lons = [c[0] for c in todas_coordenadas]
-            lats = [c[1] for c in todas_coordenadas]
-            west, south, east, north = min(lons), min(lats), max(lons), max(lats)
+            # Validación y corrección dinámica de CRS si no viene declarado
+            if gdf.crs is None:
+                filename_upper = uploaded_file.name.upper()
+                utm_zone_match = re.search(r'(?:UTM)?\s*(\d{1,2})\s*([NS])?', filename_upper)
+                if utm_zone_match and utm_zone_match.group(1):
+                    zone = int(utm_zone_match.group(1))
+                    hemis = utm_zone_match.group(2) if utm_zone_match.group(2) else 'N'
+                    epsg_inferido = 32600 + zone if hemis == 'N' else 32700 + zone
+                    gdf.set_crs(epsg=epsg_inferido, inplace=True)
+                    registrar_log(f"CRS no definido en metadatos. Inferido por nombre de archivo a EPSG:{epsg_inferido}")
+                else:
+                    bounds = gdf.total_bounds
+                    if max(abs(bounds[0]), abs(bounds[2]), abs(bounds[1]), abs(bounds[3])) > 180:
+                        registrar_log("Coordenadas proyectadas detectadas sin CRS. Asignando UTM 18N por defecto...")
+                        gdf.set_crs(epsg=32618, inplace=True)
+                    else:
+                        gdf.set_crs(epsg=4326, inplace=True)
+
+            registrar_log(f"CRS de origen detectado: {gdf.crs}")
+
+            # Reproyección automática a WGS84 (EPSG:4326) para la consulta STAC de Planetary Computer
+            gdf_wgs84 = gdf.to_crs("EPSG:4326")
+            west, south, east, north = gdf_wgs84.total_bounds
+            registrar_log(f"BBox WGS84 generado correctamente: West={west:.4f}, South={south:.4f}, East={east:.4f}, North={north:.4f}")
 
             center_lon = (west + east) / 2.0
             center_lat = (south + north) / 2.0
             
-            # Cálculo automático de Zona UTM
+            # Cálculo automático de Zona UTM óptima para el reprocesamiento final
             utm_zone = int((center_lon + 180) / 6) + 1
             hemisphere = "north" if center_lat >= 0 else "south"
             epsg_utm = 32600 + utm_zone if hemisphere == "north" else 32700 + utm_zone
 
-            registrar_log(f"Zona UTM calculada: EPSG:{epsg_utm} ({utm_zone}{'N' if hemisphere == 'north' else 'S'})")
+            registrar_log(f"Zona UTM de salida calculada: EPSG:{epsg_utm} ({utm_zone}{'N' if hemisphere == 'north' else 'S'})")
             progress_bar.progress(30)
 
             # Conexión STAC Planetary Computer
@@ -360,7 +330,7 @@ if st.button("🚀 INICIAR PROCESO DEM 2.5M", type="primary"):
             with m1:
                 st.metric(label="⛰️ Altura Mínima", value=f"{elev_min:.2f} m")
             with m2:
-                st.metric(label="🏔️️ Altura Máxima", value=f"{elev_max:.2f} m")
+                st.metric(label="🏔 Altura Máxima", value=f"{elev_max:.2f} m")
             with m3:
                 st.metric(label="📏 Desnivel", value=f"{elev_range:.2f} m")
 
